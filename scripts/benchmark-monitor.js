@@ -16,7 +16,9 @@ const CSV_HEADER =
   "totalBatchRequests,batchesThisPeriod," +
   "totalEvents,eventsThisPeriod," +
   "totalMBReceived,mbThisPeriod," +
-  "totalErrors,totalSavedFiles,diskUsageMB\n";
+  "totalErrors,totalSavedFiles," +
+  "totalS3Uploads,totalS3Errors,totalS3BytesMB," +
+  "activeSessionCount,diskUsageMB\n";
 
 const mb = (bytes) => (bytes / 1048576).toFixed(2);
 const pad = (label, value) => `${label.padEnd(20)} ${value}`;
@@ -46,7 +48,9 @@ const poll = async () => {
     `${data.totalBatchRequests},${batchesDelta},` +
     `${data.totalEvents},${eventsDelta},` +
     `${mb(data.totalBytesReceived)},${mbDelta},` +
-    `${data.totalErrors},${data.totalSavedFiles},${mb(data.diskUsageBytes)}\n`;
+    `${data.totalErrors},${data.totalSavedFiles},` +
+    `${data.totalS3Uploads ?? 0},${data.totalS3Errors ?? 0},${mb(data.totalS3BytesUploaded ?? 0)},` +
+    `${data.activeSessionCount ?? 0},${mb(data.diskUsageBytes)}\n`;
 
   if (!initialized) {
     await writeFile(csvPath, CSV_HEADER);
@@ -69,6 +73,9 @@ const poll = async () => {
   console.log(`║  ${pad("Saved files:", data.totalSavedFiles)}`);
   console.log(`║  ${pad("Disk used:", mb(data.diskUsageBytes) + " MB")}`);
   console.log(`║  ${pad("Errors:", data.totalErrors)}`);
+  console.log(`║  ${pad("Active sessions:", data.activeSessionCount ?? 0)}`);
+  const s3Label = (data.totalS3Uploads ?? 0) + (data.totalS3Errors > 0 ? ` (${data.totalS3Errors} err)` : "") + ` / ${mb(data.totalS3BytesUploaded ?? 0)} MB`;
+  console.log(`║  ${pad("S3 uploads:", s3Label)}`);
   console.log(`╠══ Last ${INTERVAL_MS / 1000}s ══════════════════════════════╣`);
   console.log(`║  ${pad("Batches:", batchesDelta)}`);
   console.log(`║  ${pad("Events:", eventsDelta)}`);

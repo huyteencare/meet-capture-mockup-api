@@ -24,7 +24,10 @@ const counters = {
   totalErrors: 0,
   totalS3Uploads: 0,
   totalS3Errors: 0,
+  totalS3BytesUploaded: 0,
 };
+
+const activeSessions = new Set();
 
 const S3_BUCKET = process.env.S3_BUCKET || "teencare-meet-captures";
 const s3 = S3_BUCKET
@@ -38,6 +41,7 @@ const uploadToS3AndDelete = async (localPath) => {
   await s3.send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body }));
   await rm(localPath);
   counters.totalS3Uploads += 1;
+  counters.totalS3BytesUploaded += body.length;
   return `s3://${S3_BUCKET}/${key}`;
 };
 
@@ -825,6 +829,7 @@ app.get("/api/stats", async (_request, response, next) => {
       cpuPercent: +cpuPercent.toFixed(1),
       memRssMB,
       ...counters,
+      activeSessionCount: activeSessions.size,
       diskUsageBytes,
     });
   } catch (error) {
@@ -846,6 +851,7 @@ app.post("/api/capture/batch", async (request, response, next) => {
     const capturePath = buildCapturePath(meetingId, sessionId);
 
     await mkdir(sessionDir, { recursive: true });
+    activeSessions.add(sessionId);
 
     const savedEvents = [];
 
@@ -980,7 +986,7 @@ const benchmarkCsvPath = path.join(
   projectRoot,
   `benchmark-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.csv`,
 );
-const CSV_HEADER = "time,uptimeSeconds,cpuPercent,memRssMB,totalBatchRequests,totalEvents,totalMBReceived,totalErrors,totalSavedFiles,diskUsageMB\n";
+const CSV_HEADER = "time,uptimeSeconds,cpuPercent,memRssMB,totalBatchRequests,totalEvents,totalMBReceived,totalErrors,totalSavedFiles,totalS3Uploads,totalS3Errors,totalS3BytesMB,activeSessionCount,diskUsageMB\n";
 await writeFile(benchmarkCsvPath, CSV_HEADER);
 
 const writeBenchmarkRow = async () => {
@@ -996,6 +1002,10 @@ const writeBenchmarkRow = async () => {
     `${(counters.totalBytesReceived / 1048576).toFixed(2)},` +
     `${counters.totalErrors},` +
     `${counters.totalSavedFiles},` +
+    `${counters.totalS3Uploads},` +
+    `${counters.totalS3Errors},` +
+    `${(counters.totalS3BytesUploaded / 1048576).toFixed(2)},` +
+    `${activeSessions.size},` +
     `${(diskUsageBytes / 1048576).toFixed(2)}\n`;
   await appendFile(benchmarkCsvPath, row);
 };

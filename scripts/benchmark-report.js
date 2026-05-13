@@ -35,6 +35,8 @@ const totalErrors    = num("totalErrors");
 const totalSaved     = num("totalSavedFiles");
 const totalS3        = num("totalS3Uploads");
 const totalS3Errors  = num("totalS3Errors");
+const totalS3MB      = Number(last.totalS3BytesMB || 0);
+const peakSessions   = Math.max(...rows.map((r) => Number(r.activeSessionCount) || 0));
 
 const peakDiskMB     = Math.max(...rows.map((r) => Number(r.diskUsageMB) || 0));
 
@@ -44,10 +46,17 @@ const avgCpu   = hasCpu ? (rows.reduce((s, r) => s + (Number(r.cpuPercent) || 0)
 const peakRam  = hasCpu ? Math.max(...rows.map((r) => Number(r.memRssMB) || 0)).toFixed(1) : null;
 const avgRam   = hasCpu ? (rows.reduce((s, r) => s + (Number(r.memRssMB) || 0), 0) / rows.length).toFixed(1) : null;
 
-const startUptime    = Number(first.uptimeSeconds || 0);
-const endUptime      = Number(last.uptimeSeconds  || 0);
-const durationS      = endUptime - startUptime;
-const durationMin    = (durationS / 60).toFixed(1);
+// Active window = rows where totalBatchRequests was increasing
+const activeRows = rows.filter((r, i) =>
+  i === 0
+    ? Number(r.totalBatchRequests) > 0
+    : Number(r.totalBatchRequests) > Number(rows[i - 1].totalBatchRequests)
+);
+const activeStart  = activeRows.length > 0 ? Number(activeRows[0].uptimeSeconds) : null;
+const activeEnd    = activeRows.length > 0 ? Number(activeRows[activeRows.length - 1].uptimeSeconds) : null;
+const durationS    = activeStart !== null ? activeEnd - activeStart : Number(last.uptimeSeconds) - Number(first.uptimeSeconds);
+const durationMin  = (durationS / 60).toFixed(1);
+const serverUptimeMin = ((Number(last.uptimeSeconds) - Number(first.uptimeSeconds)) / 60).toFixed(1);
 
 const batchesPerMin  = durationS > 0 ? (totalBatches / durationS * 60).toFixed(1) : "—";
 const eventsPerMin   = durationS > 0 ? (totalEvents  / durationS * 60).toFixed(0) : "—";
@@ -78,13 +87,17 @@ console.log(`║  Benchmark Report${" ".repeat(W - 18)}║`);
 console.log(`║  ${csvPath.slice(-W + 4).padEnd(W - 2)}║`);
 console.log(divider);
 console.log(cap("── Totals ──────────────────────────────────"));
-console.log(line("Test duration:", `${durationMin} min  (${durationS}s)`));
+console.log(line("Session duration:", `~${durationMin} min  (active batches)`));
+console.log(line("Server uptime:", `${serverUptimeMin} min`));
 console.log(line("Total batches:", totalBatches));
 console.log(line("Total events:", totalEvents));
 console.log(line("Total received:", `${totalMB} MB`));
 console.log(line("Total files saved:", totalSaved));
+if (peakSessions > 0) {
+  console.log(line("Peak active sessions:", peakSessions));
+}
 if (totalS3 > 0 || totalS3Errors > 0) {
-  const s3Label = totalS3Errors > 0 ? `${totalS3}  (${totalS3Errors} errors)` : String(totalS3);
+  const s3Label = `${totalS3} files / ${totalS3MB.toFixed(2)} MB` + (totalS3Errors > 0 ? `  (${totalS3Errors} errors)` : "");
   console.log(line("S3 uploads:", s3Label));
 }
 console.log(line("Total errors:", totalErrors));
