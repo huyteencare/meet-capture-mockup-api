@@ -5,3 +5,5 @@ downloads
 .env.local
 .env
 reports/*
+gcs-key.json
+*-key.json

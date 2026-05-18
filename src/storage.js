@@ -1,8 +1,9 @@
-// Storage abstraction — supports 'supabase' and 's3'
-// Switch provider via STORAGE_PROVIDER env var ('supabase' | 's3', default: 's3')
+// Storage abstraction — supports 'supabase', 's3', 'gcs'
+// Switch provider via STORAGE_PROVIDER env var ('supabase' | 's3' | 'gcs', default: 's3')
 
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { Storage as GCSStorage } from "@google-cloud/storage";
 import { readFile, rm } from "node:fs/promises";
 
 const PROVIDER = process.env.STORAGE_PROVIDER || "s3";
@@ -117,10 +118,56 @@ const supabase = {
 };
 
 // ---------------------------------------------------------------------------
+// Google Cloud Storage
+// ---------------------------------------------------------------------------
+
+const GCS_BUCKET = process.env.GCS_BUCKET || "meet-captures";
+const GCS_KEY_FILE = process.env.GCS_KEY_FILE || "";
+
+const gcsClient = PROVIDER === "gcs"
+  ? new GCSStorage({ keyFilename: GCS_KEY_FILE })
+  : null;
+
+const gcs = {
+  async generateUploadUrl(storageKey, mimeType = "video/webm", expiresIn = 300) {
+    const [url] = await gcsClient.bucket(GCS_BUCKET).file(storageKey).getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires: Date.now() + expiresIn * 1000,
+      contentType: mimeType,
+    });
+    return { uploadUrl: url, storageKey };
+  },
+
+  async generateDownloadUrl(storageKey, expiresIn = 3600) {
+    const [url] = await gcsClient.bucket(GCS_BUCKET).file(storageKey).getSignedUrl({
+      version: "v4",
+      action: "read",
+      expires: Date.now() + expiresIn * 1000,
+    });
+    return url;
+  },
+
+  async uploadFileAndDelete(localPath, storageKey) {
+    const body = await readFile(localPath);
+    const mimeType = localPath.endsWith(".webm")
+      ? (localPath.includes("audio") ? "audio/webm" : "video/webm")
+      : "application/octet-stream";
+    await gcsClient.bucket(GCS_BUCKET).file(storageKey).save(body, { contentType: mimeType });
+    await rm(localPath);
+    return body.length;
+  },
+
+  isConfigured() {
+    return Boolean(GCS_BUCKET && GCS_KEY_FILE);
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
-const provider = PROVIDER === "supabase" ? supabase : s3;
+const provider = PROVIDER === "supabase" ? supabase : PROVIDER === "gcs" ? gcs : s3;
 
 export const generateUploadUrl = (storageKey, mimeType, expiresIn) =>
   provider.generateUploadUrl(storageKey, mimeType, expiresIn);

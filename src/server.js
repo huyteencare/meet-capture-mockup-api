@@ -949,7 +949,7 @@ app.post("/api/capture/batch", async (request, response, next) => {
     if (isStorageConfigured()) {
       const localPaths = savedEvents.flatMap((e) =>
         Object.values(e.files || {})
-          .filter((f) => !String(f).startsWith("captures/"))
+          .filter((f) => !String(f).startsWith("captures/") && !String(f).endsWith(".json"))
           .map((f) => ({ local: path.join(sessionDir, f), storageKey: `captures/${buildCapturePath(meetingId, sessionId)}/${f}` })),
       );
       const queue = localPaths.slice();

@@ -1,12 +1,13 @@
 # Deployment & Operations
 
-**Server:** `18.142.106.202` (Ubuntu 24.04, AWS ap-southeast-1)
-**SSH key:** `~/.ssh/your_key_name.pem`
+**Server:** `160.191.244.71` (VPS)
+**SSH key:** `~/.ssh/id_ed25519`
+**Deploy path:** `/home/projects/meet-capture-api/`
 
 ## SSH into server
 
 ```bash
-ssh -i ~/.ssh/your_key_name.pem ubuntu@18.142.106.202
+ssh -i ~/.ssh/id_ed25519 root@160.191.244.71
 ```
 
 ## Redeploy after local changes
@@ -14,12 +15,20 @@ ssh -i ~/.ssh/your_key_name.pem ubuntu@18.142.106.202
 Run from your local machine:
 
 ```bash
-rsync -az --exclude 'node_modules' --exclude 'captures' \
-  -e "ssh -i ~/.ssh/your_key_name.pem" \
+rsync -avz --progress \
+  --exclude='node_modules' \
+  --exclude='captures' \
+  --exclude='.env' \
+  --exclude='.env.local' \
+  --exclude='.git' \
+  --exclude='reports' \
+  --exclude='benchmark-*.csv' \
+  --exclude='benchmark-viewer.html' \
+  -e "ssh -i ~/.ssh/id_ed25519" \
   /home/huy/workspace/teencare/meet-capture-api/ \
-  ubuntu@18.142.106.202:/home/ubuntu/meet-capture-api/
+  root@160.191.244.71:/home/projects/meet-capture-api/
 
-ssh -i ~/.ssh/your_key_name.pem ubuntu@18.142.106.202 "pm2 restart meet-capture-api"
+ssh -i ~/.ssh/id_ed25519 root@160.191.244.71 "pm2 restart meet-capture-api"
 ```
 
 ## PM2 — process management
@@ -30,13 +39,12 @@ pm2 logs meet-capture-api      # live request logs (morgan + errors)
 pm2 logs meet-capture-api --lines 200   # last 200 lines
 pm2 restart meet-capture-api   # restart app
 pm2 stop meet-capture-api      # stop app
-pm2 delete meet-capture-api    # remove from PM2
 ```
 
 ## Health check
 
 ```bash
-curl http://18.142.106.202/health
+curl http://160.191.244.71:8787/health
 ```
 
 ## API endpoints
@@ -44,31 +52,31 @@ curl http://18.142.106.202/health
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Server health + captures root path |
+| GET | `/dashboard` | Benchmark dashboard (live charts) |
+| POST | `/api/capture/presign` | Generate presigned upload URLs |
 | POST | `/api/capture/batch` | Upload batch of capture events |
 | GET | `/api/sessions` | List all recorded sessions |
 | GET | `/api/sessions/:sessionId` | Get session detail + manifest |
 | GET | `/captures/*` | Serve static capture files |
 
-## Nginx
+## PM2 logs
 
 ```bash
-sudo systemctl status nginx          # check nginx status
-sudo nginx -t                        # test config syntax
-sudo systemctl reload nginx          # reload config (no downtime)
-sudo tail -f /var/log/nginx/access.log   # nginx access log
-sudo tail -f /var/log/nginx/error.log    # nginx error log
-```
+# Live logs
+ssh -i ~/.ssh/id_ed25519 root@160.191.244.71 "pm2 logs meet-capture-api"
 
-Config file: `/etc/nginx/sites-available/meet-capture-api`
+# Last 100 lines (error only)
+ssh -i ~/.ssh/id_ed25519 root@160.191.244.71 "pm2 logs meet-capture-api --lines 100 --nostream 2>&1 | grep error"
+```
 
 ## Captures data
 
-Saved to `/home/ubuntu/meet-capture-api/captures/` on the server.
+Saved to `/home/projects/meet-capture-api/captures/` on the server.
 
 ```bash
 # Check disk usage
-du -sh /home/ubuntu/meet-capture-api/captures/
+du -sh /home/projects/meet-capture-api/captures/
 
 # List sessions
-ls /home/ubuntu/meet-capture-api/captures/
+ls /home/projects/meet-capture-api/captures/
 ```
