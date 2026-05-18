@@ -1,12 +1,12 @@
 # Deployment & Operations
 
 **Server:** `18.142.106.202` (Ubuntu 24.04, AWS ap-southeast-1)
-**SSH key:** `~/.ssh/calorielens.pem`
+**SSH key:** `~/.ssh/your_key_name.pem`
 
 ## SSH into server
 
 ```bash
-ssh -i ~/.ssh/calorielens.pem ubuntu@18.142.106.202
+ssh -i ~/.ssh/your_key_name.pem ubuntu@18.142.106.202
 ```
 
 ## Redeploy after local changes
@@ -15,11 +15,11 @@ Run from your local machine:
 
 ```bash
 rsync -az --exclude 'node_modules' --exclude 'captures' \
-  -e "ssh -i ~/.ssh/calorielens.pem" \
+  -e "ssh -i ~/.ssh/your_key_name.pem" \
   /home/huy/workspace/teencare/meet-capture-api/ \
   ubuntu@18.142.106.202:/home/ubuntu/meet-capture-api/
 
-ssh -i ~/.ssh/calorielens.pem ubuntu@18.142.106.202 "pm2 restart meet-capture-api"
+ssh -i ~/.ssh/your_key_name.pem ubuntu@18.142.106.202 "pm2 restart meet-capture-api"
 ```
 
 ## PM2 — process management
