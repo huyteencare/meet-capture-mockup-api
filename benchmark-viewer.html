@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Benchmark Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
+  h1 { font-size: 1.1rem; font-weight: 600; color: #94a3b8; letter-spacing: .05em; text-transform: uppercase; margin-bottom: 20px; }
+
+  .drop-zone {
+    border: 2px dashed #334155; border-radius: 12px; padding: 48px;
+    text-align: center; color: #475569; font-size: .9rem; cursor: pointer;
+    transition: .2s; margin-bottom: 24px;
+  }
+  .drop-zone.drag { border-color: #3b82f6; color: #93c5fd; background: #1e293b; }
+  .drop-zone input { display: none; }
+
+  .summary { display: none; }
+  .filename { font-size: .8rem; color: #64748b; margin-bottom: 20px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .card { background: #1e293b; border-radius: 10px; padding: 12px 16px; }
+  .card .label { font-size: .65rem; color: #64748b; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+  .card .value { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; }
+  .card .sub { font-size: .7rem; color: #475569; margin-top: 3px; }
+  .card .value.ok { color: #34d399; }
+  .card .value.warn { color: #f59e0b; }
+  .card .value.error { color: #f87171; }
+
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; }
+  .chart-box { background: #1e293b; border-radius: 10px; padding: 16px 20px; }
+  .chart-box h2 { font-size: .72rem; color: #64748b; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<h1>Benchmark CSV Viewer</h1>
+
+<div class="drop-zone" id="dropZone">
+  <div>Drop a <strong>benchmark-*.csv</strong> file here</div>
+  <div style="margin-top:8px;font-size:.8rem">or click to select</div>
+  <input type="file" id="fileInput" accept=".csv">
+</div>
+
+<div class="summary" id="summary">
+  <div class="filename" id="filename"></div>
+  <div class="cards" id="cards"></div>
+  <div class="charts" id="charts"></div>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('drag'); loadFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => loadFile(fileInput.files[0]));
+
+function loadFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => render(file.name, e.target.result);
+  reader.readAsText(file);
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n').filter(l => !l.startsWith('#') && l.trim());
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const vals = line.split(',');
+    return Object.fromEntries(headers.map((h, i) => [h, vals[i]?.trim() ?? '']));
+  });
+}
+
+const chartInstances = [];
+function mkChart(canvasId, label, color, labels, data, tickLabels) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  const c = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label, data, borderColor: color,
+        backgroundColor: color + '22', fill: true,
+        tension: .35, pointRadius: 1.5,
+      }]
+    },
+    options: {
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: {
+            color: '#475569', maxRotation: 0,
+            callback: (value) => tickLabels?.[value] || '',
+          },
+          grid: { color: '#1e293b' }
+        },
+        y: { ticks: { color: '#475569' }, grid: { color: '#334155' }, beginAtZero: true }
+      }
+    }
+  });
+  chartInstances.push(c);
+}
+
+function card(label, value, sub = '', cls = '') {
+  return `<div class="card">
+    <div class="label">${label}</div>
+    <div class="value ${cls}">${value}</div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}
+  </div>`;
+}
+
+function fmt(s) {
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function render(filename, text) {
+  chartInstances.forEach(c => c.destroy());
+  chartInstances.length = 0;
+
+  const rows = parseCSV(text);
+  if (rows.length === 0) { alert('No data found in CSV.'); return; }
+
+  const first = rows[0], last = rows[rows.length - 1];
+  const num = (r, k) => Number(r[k] || 0);
+
+  // active window
+  const activeRows = rows.filter((r, i) =>
+    i === 0 ? num(r, 'totalBatchRequests') > 0
+             : num(r, 'totalBatchRequests') > num(rows[i-1], 'totalBatchRequests')
+  );
+  const activeStart = activeRows.length ? num(activeRows[0], 'uptimeSeconds') : null;
+  const activeEnd   = activeRows.length ? num(activeRows[activeRows.length-1], 'uptimeSeconds') : null;
+  const durationS   = activeStart !== null ? activeEnd - activeStart : num(last, 'uptimeSeconds') - num(first, 'uptimeSeconds');
+
+  const peakCpu  = Math.max(...rows.map(r => num(r, 'cpuPercent'))).toFixed(1);
+  const avgCpu   = (rows.reduce((s, r) => s + num(r, 'cpuPercent'), 0) / rows.length).toFixed(1);
+  const peakRam  = Math.max(...rows.map(r => num(r, 'memRssMB'))).toFixed(0);
+  const avgRam   = (rows.reduce((s, r) => s + num(r, 'memRssMB'), 0) / rows.length).toFixed(0);
+  const peakDisk = Math.max(...rows.map(r => num(r, 'diskUsageMB'))).toFixed(2);
+  const peakSess = Math.max(...rows.map(r => num(r, 'activeSessionCount')));
+
+  const totalBatches = num(last, 'totalBatchRequests');
+  const totalEvents  = num(last, 'totalEvents');
+  const totalMB      = Number(last.totalMBReceived || last.totalMBReceived || 0);
+  const totalErrors  = num(last, 'totalErrors');
+  const totalS3      = num(last, 'totalS3Uploads');
+
+  // labels: convert UTC → UTC+7 (Vietnam), show HH:MM, tick every 2 min
+  const UTC_OFFSET_H = 7;
+  const labels = rows.map(r => {
+    const t = r.time || '';
+    if (!t) return '';
+    const d = new Date(t);
+    if (isNaN(d)) return t.slice(11, 16);
+    d.setUTCHours(d.getUTCHours() + UTC_OFFSET_H);
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+  });
+
+  // show tick only at 5-min boundaries
+  const tickLabels = labels.map((l) => {
+    const mm = parseInt(l.slice(3), 10);
+    return mm % 2 === 0 ? l : '';
+  });
+
+  // delta series — clamp negatives to 0 (counter reset on server restart)
+  const deltaBatches = rows.map((r, i) => i === 0 ? 0 : Math.max(0, num(r, 'totalBatchRequests') - num(rows[i-1], 'totalBatchRequests')));
+  const deltaEvents  = rows.map((r, i) => i === 0 ? 0 : Math.max(0, num(r, 'totalEvents') - num(rows[i-1], 'totalEvents')));
+  const deltaMB      = rows.map((r, i) => {
+    if (i === 0) return 0;
+    const cur = Number(r.totalMBReceived || 0);
+    const prv = Number(rows[i-1].totalMBReceived || 0);
+    return +Math.max(0, cur - prv).toFixed(2);
+  });
+
+  // render
+  document.getElementById('filename').textContent = filename + '  ·  ' + rows.length + ' samples';
+  document.getElementById('summary').style.display = 'block';
+  dropZone.style.display = 'none';
+
+  document.getElementById('cards').innerHTML = [
+    card('Session duration', fmt(durationS), `server uptime: ${fmt(num(last, 'uptimeSeconds'))}`),
+    card('CPU avg / peak', `${avgCpu}%`, `peak: ${peakCpu}%`, peakCpu > 70 ? 'warn' : 'ok'),
+    card('RAM avg / peak', `${avgRam} MB`, `peak: ${peakRam} MB`),
+    card('Peak disk', `${peakDisk} MB`),
+    card('Peak sessions', peakSess, 'concurrent'),
+    card('Total batches', totalBatches),
+    card('Total events', totalEvents),
+    card('Total received', `${totalMB} MB`),
+    card('S3 uploads', totalS3, '', 'ok'),
+    card('Errors', totalErrors, '', totalErrors > 0 ? 'error' : 'ok'),
+  ].join('');
+
+  document.getElementById('charts').innerHTML = [
+    ['ch-cpu',     'CPU %'],
+    ['ch-ram',     'RAM (MB)'],
+    ['ch-sessions','Active Sessions'],
+    ['ch-batches', 'Batches / interval'],
+    ['ch-events',  'Events / interval'],
+    ['ch-mb',      'MB received / interval'],
+    ['ch-disk',    'Disk used (MB)'],
+  ].map(([id, title]) => `
+    <div class="chart-box">
+      <h2>${title}</h2>
+      <canvas id="${id}"></canvas>
+    </div>
+  `).join('');
+
+  mkChart('ch-cpu',      'CPU %',     '#f472b6', labels, rows.map(r => +num(r, 'cpuPercent').toFixed(1)), tickLabels);
+  mkChart('ch-ram',      'RAM MB',    '#a78bfa', labels, rows.map(r => num(r, 'memRssMB')), tickLabels);
+  mkChart('ch-sessions', 'Sessions',  '#22d3ee', labels, rows.map(r => num(r, 'activeSessionCount')), tickLabels);
+  mkChart('ch-batches',  'Batches',   '#818cf8', labels, deltaBatches, tickLabels);
+  mkChart('ch-events',   'Events',    '#34d399', labels, deltaEvents, tickLabels);
+  mkChart('ch-mb',       'MB',        '#f59e0b', labels, deltaMB, tickLabels);
+  mkChart('ch-disk',     'Disk MB',   '#38bdf8', labels, rows.map(r => +Number(r.diskUsageMB || 0).toFixed(2)), tickLabels);
+}
+</script>
+</body>
+</html>

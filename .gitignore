@@ -1,3 +1,7 @@
 node_modules/
 captures/
 .DS_Store
+downloads
+.env.local
+.env
+reports/*

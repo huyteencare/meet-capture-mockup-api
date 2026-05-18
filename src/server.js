@@ -1,6 +1,10 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import cors from "cors";
+import {
+  generateDownloadUrl,
+  generateUploadUrl,
+  isConfigured as isStorageConfigured,
+  uploadFileAndDelete,
+} from "./storage.js";
 import express from "express";
 import morgan from "morgan";
 import { execFile } from "node:child_process";
@@ -29,24 +33,8 @@ const counters = {
 
 const activeSessions = new Set();
 
-const S3_BUCKET = process.env.S3_BUCKET || "teencare-meet-captures";
-const s3 = S3_BUCKET
-  ? new S3Client({ region: process.env.AWS_REGION || "ap-southeast-1" })
-  : null;
-
-const uploadToS3AndDelete = async (localPath) => {
-  if (!s3) return null;
-  const key = `captures/${path.relative(capturesRoot, localPath).split(path.sep).join("/")}`;
-  const body = await readFile(localPath);
-  await s3.send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body }));
-  await rm(localPath);
-  counters.totalS3Uploads += 1;
-  counters.totalS3BytesUploaded += body.length;
-  return `s3://${S3_BUCKET}/${key}`;
-};
-
 const signEventFiles = async (events, capturePath) => {
-  if (!s3 || !S3_BUCKET) return events;
+  if (!isStorageConfigured()) return events;
   return Promise.all(
     events.map(async (event) => {
       const files = event.files || {};
@@ -54,15 +42,14 @@ const signEventFiles = async (events, capturePath) => {
       const fileUrls = {};
       await Promise.all(
         Object.entries(files).map(async ([key, relPath]) => {
-          const s3Key = `captures/${capturePath}/${relPath}`;
+          // Direct-upload chunks store the full storage key; legacy chunks store relative local paths
+          const storageKey = String(relPath).startsWith("captures/")
+            ? relPath
+            : `captures/${capturePath}/${relPath}`;
           try {
-            fileUrls[key] = await getSignedUrl(
-              s3,
-              new GetObjectCommand({ Bucket: S3_BUCKET, Key: s3Key }),
-              { expiresIn: 3600 },
-            );
+            fileUrls[key] = await generateDownloadUrl(storageKey, 3600);
           } catch {
-            // file not in S3 (local-only session) — viewer falls back to static path
+            // file not in storage (local-only session) — viewer falls back to static path
           }
         }),
       );
@@ -339,6 +326,17 @@ const getChunkStorageInfo = (payload, fallbackBaseName) => {
   };
 };
 
+const buildChunkStorageKey = (meetingId, sessionId, payload, baseName) => {
+  const storage = getChunkStorageInfo(payload, baseName);
+  return [
+    "captures",
+    sanitizeSegment(meetingId, "unknown-meeting"),
+    sanitizeSegment(sessionId, "unknown-session"),
+    ...storage.dirParts,
+    storage.fileName,
+  ].join("/");
+};
+
 const enrichManifest = (manifest, manifestPath) => {
   if (!manifest) return manifest;
   const capturePath =
@@ -492,7 +490,25 @@ const saveEvent = async (sessionDir, event, index) => {
   }
 
   if (event.type === "chunk") {
-    if (payload.data) {
+    if (payload.storageKey || payload.s3Key) {
+      // Direct storage upload — binary already in storage, store key reference only
+      saved.files.recording = payload.storageKey || payload.s3Key;
+      saved.metadata = {
+        streamId: payload.streamId,
+        participantId: payload.participantId,
+        kind: payload.kind,
+        mediaRole: payload.mediaRole,
+        trackSource: payload.trackSource,
+        mimeType: payload.mimeType || "",
+        chunkStartedAt: Number(payload.chunkStartedAt || 0) || null,
+        chunkEndedAt: Number(payload.chunkEndedAt || 0) || null,
+        durationMs: Number(payload.durationMs || 0),
+        initChunk: Boolean(payload.initChunk),
+        index: Number(payload.index || 0),
+        byteSize: Number(payload.byteSize || 0),
+        uploadedDirectly: true,
+      };
+    } else if (payload.data) {
       const { buffer, mimeType } = parseDataUrl(payload.data);
       const storage = getChunkStorageInfo(payload, baseName);
       const chunkDir = path.join(sessionDir, ...storage.dirParts);
@@ -715,11 +731,13 @@ app.get("/dashboard", (_request, response) => {
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; animation: pulse 2s infinite; }
   .dot.offline { background: #f87171; animation: none; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .reset-btn { margin-left: auto; padding: 4px 14px; background: #1e293b; border: 1px solid #334155; color: #94a3b8; border-radius: 6px; font-size: .75rem; cursor: pointer; transition: .15s; }
+  .reset-btn:hover { background: #ef4444; border-color: #ef4444; color: #fff; }
 </style>
 </head>
 <body>
 <h1>Meet Capture — Benchmark Dashboard</h1>
-<div class="status-bar"><div class="dot" id="dot"></div><span id="status">Connecting…</span></div>
+<div class="status-bar"><div class="dot" id="dot"></div><span id="status">Connecting…</span><button class="reset-btn" onclick="resetStats()">Reset Stats</button></div>
 <div class="cards">
   <div class="card"><div class="label">Uptime</div><div class="value" id="c-uptime">—</div></div>
   <div class="card"><div class="label">CPU</div><div class="value" id="c-cpu">—</div></div>
@@ -812,6 +830,13 @@ const poll = async () => {
   }
 };
 
+const resetStats = async () => {
+  if (!confirm("Reset all counters to 0?")) return;
+  await fetch("/api/stats/reset", { method: "POST" });
+  prev = null;
+  poll();
+};
+
 poll();
 setInterval(poll, POLL_MS);
 </script>
@@ -834,6 +859,38 @@ app.get("/api/stats", async (_request, response, next) => {
     });
   } catch (error) {
     next(error);
+  }
+});
+
+app.post("/api/stats/reset", (_request, response) => {
+  for (const key of Object.keys(counters)) counters[key] = 0;
+  response.json({ ok: true, resetAt: new Date().toISOString() });
+});
+
+app.post("/api/capture/presign", async (request, response, next) => {
+  if (!isStorageConfigured()) return response.status(503).json({ ok: false, reason: "Storage not configured" });
+  try {
+    const body = request.body || {};
+    const meetingId = sanitizeSegment(body.meetingId, "unknown-meeting");
+    const sessionId = sanitizeSegment(body.sessionId, "unknown-session");
+    const chunks = Array.isArray(body.chunks) ? body.chunks : [];
+
+    const presignedUrls = await Promise.all(
+      chunks.map(async (chunk) => {
+        const timestamp = Math.floor(Number(chunk.eventAt || Date.now()));
+        const streamId = sanitizeSegment(chunk.streamId || "", "stream");
+        const padded = String(Number(chunk.index ?? 0)).padStart(4, "0");
+        const baseName = `${timestamp}-${streamId}-${padded}`;
+        const storageKey = buildChunkStorageKey(meetingId, sessionId, chunk, baseName);
+        const mimeType = String(chunk.mimeType || "video/webm");
+        const { uploadUrl } = await generateUploadUrl(storageKey, mimeType, 300);
+        return { storageKey, uploadUrl, expiresAt: Date.now() + 295_000 };
+      }),
+    );
+
+    response.json({ ok: true, presignedUrls });
+  } catch (err) {
+    next(err);
   }
 });
 
@@ -888,21 +945,29 @@ app.post("/api/capture/batch", async (request, response, next) => {
       `processingMs=${Date.now() - batchStartMs} savedFiles=${savedFileCount}`,
     );
 
-    // Fire-and-forget S3 upload — doesn't block the response
-    if (s3) {
+    // Fire-and-forget storage upload — max 4 concurrent to avoid CPU spikes (legacy base64 path)
+    if (isStorageConfigured()) {
       const localPaths = savedEvents.flatMap((e) =>
-        Object.values(e.files || {}).map((f) => path.join(sessionDir, f)),
+        Object.values(e.files || {})
+          .filter((f) => !String(f).startsWith("captures/"))
+          .map((f) => ({ local: path.join(sessionDir, f), storageKey: `captures/${buildCapturePath(meetingId, sessionId)}/${f}` })),
       );
-      Promise.all(
-        localPaths.map((p) =>
-          uploadToS3AndDelete(p).catch((err) => {
+      const queue = localPaths.slice();
+      const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length > 0) {
+          const item = queue.shift();
+          if (item) await uploadFileAndDelete(item.local, item.storageKey).then((bytes) => {
+            counters.totalS3Uploads += 1;
+            counters.totalS3BytesUploaded += bytes;
+          }).catch((err) => {
             counters.totalS3Errors += 1;
-            console.error(`[S3] Upload failed ${path.relative(capturesRoot, p)}: ${err.message}`);
-          }),
-        ),
-      ).then(() => {
+            console.error(`[Storage] Upload failed ${path.relative(capturesRoot, item.local)}: ${err.message}`);
+          });
+        }
+      });
+      Promise.all(workers).then(() => {
         if (localPaths.length > 0) {
-          console.log(`[S3] Uploaded ${localPaths.length} files for session=${sessionId}`);
+          console.log(`[Storage] Uploaded ${localPaths.length} files for session=${sessionId}`);
         }
       });
     }
