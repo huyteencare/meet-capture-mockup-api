@@ -7,3 +7,4 @@ downloads
 reports/*
 gcs-key.json
 *-key.json
+benchmark*.csv
