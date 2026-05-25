@@ -9,6 +9,8 @@ npm install
 npm start
 ```
 
+`npm start` now loads local env from `.env`.
+
 Default URL:
 
 ```text

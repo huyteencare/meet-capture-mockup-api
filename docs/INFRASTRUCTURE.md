@@ -2,11 +2,11 @@
 
 ## Overview
 
-Meet Capture records per-student audio/video from Google Meet sessions. The extension runs in the mentor's Chrome browser and streams binary chunks to storage. Backend is a lightweight Node.js/Express server on EC2 — its only job after the direct-S3 migration is to handle metadata and generate pre-signed URLs.
+Meet Capture records per-student audio/video from Google Meet sessions. The extension runs in the mentor's Chrome browser and uploads video chunks directly to GCS. Backend is a lightweight Node.js/Express server — its job is to generate HMAC presigned URLs, receive event metadata, and maintain session manifests on disk.
 
 ---
 
-## Architecture — Current (Direct S3 Upload)
+## Architecture — Current (Direct GCS Upload)
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -18,156 +18,135 @@ Meet Capture records per-student audio/video from Google Meet sessions. The exte
 │     { meetingId, sessionId, chunks[] }            │  │
 │                                                   │  │
 │  3. PUT binary directly ──────────────────────┐  │  │
-│     (pre-signed URL, no backend involved)     │  │  │
+│     (presigned URL, bypasses backend)         │  │  │
 │                                               │  │  │
 │  4. POST /api/capture/batch ───────────────┐  │  │  │
-│     { s3Key, byteSize, metadata }          │  │  │  │
+│     { storageKey, byteSize, metadata }     │  │  │  │
 └────────────────────────────────────────────┼──┼──┘  │
-                                             │  │     │
-                                             ▼  ▼     │
+                                             │  │
+                                             ▼  ▼
 ┌──────────────────────┐      ┌──────────────────────┐
-│  EC2 — Node.js/PM2   │  2.  │  Amazon S3           │
-│                      │◄─────│                      │
-│  • Generate pre-     │  pre-│  teencare-meet-      │
-│    signed PUT URLs   │  sign│  captures            │
+│  VPS — Node.js/PM2   │  2.  │  Google Cloud        │
+│  160.191.244.71      │◄─────│  Storage             │
+│                      │ HMAC │                      │
+│  • Generate HMAC     │ sign │  bucket:             │
+│    presigned URLs    │      │  meet-captures       │
 │  • Save event JSON   │      │                      │
 │    metadata to disk  │      │  captures/           │
 │  • Session manifests │      │    {meetingId}/      │
 │  • Benchmark logging │      │      {sessionId}/    │
 │  • GET /api/sessions │      │        participants/ │
 │                      │      │        mentor-audio/ │
-│  t3.small            │      │        shared-audio/ │
-│  ap-southeast-1      │      │                      │
-└──────────────────────┘      │  Lifecycle: 30 days  │
-                              └──────────────────────┘
+│  PM2 max_memory: 2G  │      │        shared-audio/ │
+└──────────────────────┘      └──────────────────────┘
 ```
 
 ## Fallback
 
-If presign fails or any S3 PUT fails, the extension automatically falls back to the legacy base64 path — no data loss.
+Nếu presign fail hoặc GCS PUT fail, extension tự fallback sang base64 path — không mất data.
 
 ```
 try {
-  presign → PUT to S3 → POST metadata   // direct=true
+  presign → PUT to GCS → POST metadata   // direct=true
 } catch {
-  POST base64 to /api/capture/batch     // direct=false, legacy path
+  POST base64 to /api/capture/batch      // direct=false, legacy path
 }
 ```
 
 ---
 
-## AWS Configuration
+## Server
 
-### S3 Bucket — `teencare-meet-captures`
+**Host:** VPS `160.191.244.71`
+**OS:** Ubuntu (KVM)
+**Specs:** 6 vCPU · 5.8 GB RAM · 79 GB SSD
 
-**Region:** ap-southeast-1 (Singapore)
+Shared với các service khác trên cùng VPS:
 
-**CORS policy** (allows Chrome extension to PUT directly from meet.google.com):
+| Service | RAM usage | Notes |
+|---------|-----------|-------|
+| openclaw-gateway | ~1.7 GB | service chính, uptime từ tháng 4 |
+| next-server | ~200 MB | |
+| doisoatdata (Docker) | ~100 MB | Python/FastAPI, port 5000 |
+| nginx | nhỏ | reverse proxy |
+| **meet-capture-api** | ~130 MB | PM2, port 8787 |
+
+**Process manager:** PM2 với `max_memory_restart: 2G` — tự restart nếu vượt 2 GB RAM. Không có hard CPU cap.
+
+Effective headroom cho meet-capture-api: **~2–2.5 GB RAM**, toàn bộ CPU (shared).
+
+---
+
+## GCS Configuration
+
+**Bucket:** `meet-captures`
+**Region:** asia-southeast1 (Singapore)
+**Signing:** HMAC key (~100× nhanh hơn RSA service account)
+
+**CORS policy** (cho phép Chrome extension PUT trực tiếp từ meet.google.com):
 
 ```json
 [{
-  "AllowedHeaders": ["Content-Type", "Content-Length"],
-  "AllowedMethods": ["PUT"],
-  "AllowedOrigins": ["https://meet.google.com"],
-  "ExposeHeaders": ["ETag"],
-  "MaxAgeSeconds": 3000
+  "origin": ["https://meet.google.com"],
+  "method": ["PUT"],
+  "responseHeader": ["Content-Type", "Content-Length"],
+  "maxAgeSeconds": 3600
 }]
 ```
 
-**Lifecycle rule** — auto-delete after 30 days:
-
-```json
-{
-  "Rules": [{
-    "ID": "auto-delete-captures",
-    "Filter": { "Prefix": "captures/" },
-    "Status": "Enabled",
-    "Expiration": { "Days": 30 }
-  }]
-}
-```
-
-To change retention period:
-```bash
-aws s3api put-bucket-lifecycle-configuration \
-  --bucket teencare-meet-captures \
-  --lifecycle-configuration '{"Rules":[{"ID":"auto-delete-captures","Filter":{"Prefix":"captures/"},"Status":"Enabled","Expiration":{"Days":60}}]}'
-```
-
-### S3 Key Structure
+### GCS folder structure
 
 ```
 captures/
   {meetingId}/
     {sessionId}/
       participants/
-        {participantName}/
+        {streamId}/            ← dùng streamId, không dùng tên (tránh split folder)
           video/
-            chunk-{index}-{timestamp}-{streamId}-{seq}.webm
+            chunk-{index}-{timestamp}.webm
       mentor-audio/
-        chunk-{index}-{timestamp}-{streamId}-{seq}.webm
+        chunk-{index}-{timestamp}.webm
       shared-audio/
         {streamId}/
-          chunk-{index}-{timestamp}-{streamId}-{seq}.webm
+          chunk-{index}-{timestamp}.webm
       manifest.json
 ```
+
+> **Known issue:** Extension hiện vẫn dùng `participantId` (tên resolve từ Meet DOM) thay vì `streamId` cố định → cùng 1 student có thể tạo 2 folder (1 số + 1 tên) khi tắt/mở cam. Fix cần ở extension repo.
 
 ---
 
 ## Cost Estimate
 
-**Assumptions:** 250 sessions/day × 30 days = 7,500 sessions/month. Session duration ~1 hour. Direct S3 upload (binary never touches EC2). 30-day lifecycle on `captures/`.
+**Assumptions:** 8 mentor × avg 3 sessions/ngày × 20 ngày/tháng = ~480 sessions/tháng. Avg 35 phút, 2–3 students/session.
 
-### S3 — 1:1 class (1 student per session, no shared-audio)
+### GCS Storage
 
-Each session: ~0.26 GB storage, ~900 S3 PUTs (2 streams × 450 batch cycles/hr).
+| Track | Size/session | 480 sessions/tháng |
+|-------|-------------|-------------------|
+| mentor-audio | ~25 MB | ~12 GB |
+| shared-audio | ~3 MB | ~1.5 GB |
+| student-video (avg 2 students) | ~194 MB | ~93 GB |
+| **Tổng** | **~222 MB** | **~107 GB** |
 
-| Item | Calculation | Cost/month |
-|---|---|---|
-| Storage | 7,500 sessions × 0.26 GB = 1,950 GB × $0.023 | ~$45 |
-| PUT requests | 7,500 × 900 = 6.75M × $0.005/1K | ~$34 |
-| GET requests (review) | ~10% access | ~$1 |
-| **S3 total** | | **~$80** |
+| Item | Calculation | Cost/tháng |
+|------|-------------|------------|
+| Storage | 107 GB × $0.022 | ~$2.4 |
+| PUT requests | 480 × ~500 chunks × $0.005/10K | ~$0.12 |
+| **GCS total** | | **~$2.5** |
 
-### EC2
+### VPS
 
-EC2 cost is the same regardless of session type — backend only handles small JSON after direct-S3 migration.
-
-| Instance | On-demand | 1-yr reserved |
-|---|---|---|
-| t3.small (current) | ~$15/mo | ~$9/mo |
-| t3.micro (viable after direct-S3) | ~$7.50/mo | ~$4.50/mo |
-
-### Total — 250 sessions/day
-
-| Config | S3 | EC2 | Monthly total |
-|---|---|---|---|
-| 250 1:1 sessions (1 student) | ~$80 | ~$15 | **~$95** |
-
----
-
-## Why Not Serverless (Lambda)
-
-Serverless (Lambda + API Gateway + DynamoDB) would cost ~$8/mo in compute but requires a full rewrite:
-
-| Issue | Current | Lambda needs |
-|---|---|---|
-| Session state | in-memory Map | DynamoDB |
-| Event files | local disk JSON | DynamoDB or S3 |
-| Benchmark CSV | `setInterval` write | CloudWatch / separate Lambda |
-| Session listing | fs scan | DynamoDB query |
-
-Savings vs EC2 t3.small: ~$7/mo. Not worth the migration effort at current scale.
-
-**Revisit at:** 1000+ sessions/day where EC2 needs vertical scaling ($60–120/mo range) while Lambda cost stays flat.
+VPS dùng chung với các service khác — chi phí meet-capture-api không tính riêng.
 
 ---
 
 ## Scaling Thresholds
 
-| Sessions/day | Concurrent peak | Recommendation |
-|---|---|---|
-| ≤ 250 | ~31 | t3.small or t3.micro, direct S3 |
-| 250–500 | ~63 | t3.medium, consider reserved |
-| 500–1000 | ~125 | t3.large or horizontal scaling |
-| 1000+ | 125+ | Evaluate serverless migration |
+| Sessions/ngày | Concurrent peak | Recommendation |
+|---------------|-----------------|----------------|
+| ≤ 50 | ~10–15 | VPS hiện tại ổn |
+| 50–150 | ~30–40 | Tăng RAM VPS hoặc tách riêng process |
+| 150+ | 50+ | Dedicated VPS hoặc horizontal scaling |
+
+Bottleneck dự kiến tiếp theo: **disk I/O** nếu GCS upload bị delay và file queue lên (không phải CPU — đã giải quyết qua direct upload).
