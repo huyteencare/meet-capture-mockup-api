@@ -1,4 +1,5 @@
 import cors from "cors";
+import { createAttendanceIdentityProbe } from "./attendanceIdentityProbe.js";
 import { isConfigured as isStorageConfigured } from "./storage.js";
 import { createCaptureRouter } from "./routes/capture.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
@@ -191,6 +192,46 @@ const mergeAttendanceCandidates = (existingCandidates = [], incomingCandidates =
   return Array.from(merged.values()).sort((a, b) => new Date(a.joinObservedAt).getTime() - new Date(b.joinObservedAt).getTime());
 };
 
+const normalizeIdentityProbeResult = (result = {}) => {
+  const candidate = result.candidate || {};
+  const matchedParticipant = result.matchedParticipant || {};
+  const identitySignals = result.identitySignals || {};
+  const candidateId = String(candidate.candidateId || "").trim().slice(0, 240);
+  if (!candidateId) return null;
+  return {
+    candidateId,
+    participantDisplayName: String(candidate.participantDisplayName || "").trim().slice(0, 255) || "unknown",
+    probeStatus: String(result.matchOutcome || result.finalVerdict || "unknown").trim().slice(0, 64) || "unknown",
+    finalVerdict: String(result.finalVerdict || "").trim().slice(0, 64) || null,
+    participantType: String(matchedParticipant.participantType || "").trim().slice(0, 64) || null,
+    signedinUserUser: String(identitySignals.signedinUserUser || matchedParticipant.signedinUserUser || "").trim().slice(0, 240) || null,
+    lastProbedAt: new Date().toISOString(),
+    retryScheduled: Boolean(result.retryScheduled),
+  };
+};
+
+export const updateManifestIdentityProbeResult = (capturesRoot) => async ({ meetingId, sessionId, payload }) => {
+  const safeMeetingId = sanitizeSegment(meetingId, "unknown-meeting");
+  const safeSessionId = sanitizeSegment(sessionId, "unknown-session");
+  if (!safeMeetingId || !safeSessionId) return null;
+
+  const normalized = normalizeIdentityProbeResult(payload);
+  if (!normalized) return null;
+
+  const sessionDir = path.join(capturesRoot, safeMeetingId, safeSessionId);
+  const manifestPath = path.join(sessionDir, "manifest.json");
+  const manifest = await readManifest(manifestPath);
+  if (!manifest) return null;
+
+  const existing = Array.isArray(manifest.identityProbeResults) ? manifest.identityProbeResults : [];
+  const merged = new Map(existing.map((entry) => [String(entry?.candidateId || ""), entry]).filter(([candidateId]) => !!candidateId));
+  merged.set(normalized.candidateId, { ...(merged.get(normalized.candidateId) || {}), ...normalized });
+  manifest.identityProbeResults = Array.from(merged.values()).sort((a, b) => String(a.lastProbedAt || "").localeCompare(String(b.lastProbedAt || "")));
+  manifest.updatedAt = new Date().toISOString();
+  await writeJson(manifestPath, manifest);
+  return normalized;
+};
+
 const forwardAttendanceCandidates = (webhookUrl, webhookSecret) => async ({ meetingId, sessionId, mentorLabel, candidates }) => {
   if (!webhookUrl || !Array.isArray(candidates) || candidates.length === 0) return 0;
   const normalizedCandidates = candidates.map(normalizeAttendanceCandidate).filter(Boolean);
@@ -360,11 +401,20 @@ export const saveEvent = (capturesRoot) => async (sessionDir, event, index) => {
   return saved;
 };
 
-export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookSecret = "" } = {}) {
+export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookSecret = "", attendanceIdentityProbe } = {}) {
   const counters = { totalBatchRequests: 0, totalEvents: 0, totalBytesReceived: 0, totalSavedFiles: 0, totalErrors: 0, totalS3Uploads: 0, totalS3Errors: 0, totalS3BytesUploaded: 0 };
   const activeSessions = new Map();
   const ACTIVE_SESSION_TTL_MS = 5 * 60 * 1000;
   const serverStartMs = Date.now();
+  const identityProbe = attendanceIdentityProbe || createAttendanceIdentityProbe({
+    onResult: async ({ sessionId, payload }) => {
+      await updateManifestIdentityProbeResult(capturesRoot)({
+        meetingId: payload?.candidate?.meetingId,
+        sessionId,
+        payload,
+      });
+    },
+  });
 
   let lastCpuUsage = process.cpuUsage();
   let lastCpuMs = Date.now();
@@ -399,6 +449,7 @@ export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookS
     saveEvent: saveEvent(capturesRoot),
     appendManifestEvents: appendManifestEvents(capturesRoot),
     forwardAttendanceCandidates: forwardAttendanceCandidates(webhookUrl, webhookSecret),
+    attendanceIdentityProbe: identityProbe,
   }));
 
   app.use(createSessionsRouter({

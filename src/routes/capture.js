@@ -14,6 +14,7 @@ export function createCaptureRouter({
   saveEvent,
   appendManifestEvents,
   forwardAttendanceCandidates,
+  attendanceIdentityProbe,
 }) {
   const router = Router();
 
@@ -110,6 +111,10 @@ export function createCaptureRouter({
           .map((event) => event?.payload || {}),
       });
 
+      const attendanceCandidateEvents = events
+        .filter((event) => event?.type === "attendance-candidate")
+        .map((event) => event?.payload || {});
+
       // Fire-and-forget server-side upload for legacy base64 payloads
       if (isStorageConfigured()) {
         const localPaths = savedEvents.flatMap((e) =>
@@ -148,6 +153,12 @@ export function createCaptureRouter({
           : 0,
         forwardedAttendanceCount,
         sessionPath: path.relative(projectRoot, sessionDir),
+      });
+
+      attendanceIdentityProbe?.scheduleBatch({
+        meetingId,
+        sessionId,
+        candidates: attendanceCandidateEvents,
       });
     } catch (error) {
       next(error);
