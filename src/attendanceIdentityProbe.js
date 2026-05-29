@@ -32,12 +32,16 @@ const clampString = (value, max) => String(value || "").trim().slice(0, max);
 export const normalizeProbeCandidate = (meetingId, candidate = {}) => {
   const candidateId = clampString(candidate.candidateId, 240);
   const participantDisplayName = clampString(candidate.participantDisplayName, 255) || "unknown";
+  const displayName = clampString(candidate.displayName || candidate.participantDisplayName, 255) || "unknown";
+  const provisionalParticipantKey = clampString(candidate.provisionalParticipantKey, 255) || null;
   const joinObservedAt = clampString(candidate.joinObservedAt, 64);
   if (!meetingId || !candidateId || !joinObservedAt) return null;
   return {
     meetingId: clampString(meetingId, 120),
     candidateId,
     participantDisplayName,
+    displayName,
+    provisionalParticipantKey,
     joinObservedAt,
     streamIds: Array.isArray(candidate.evidence?.streamIds) ? candidate.evidence.streamIds.map((value) => String(value)) : [],
     confidence: Number(candidate.confidence || 0),
@@ -232,6 +236,8 @@ const makeLogPayload = ({ attempt, maxAttempts, candidate, conferenceRecord, mat
     meetingId: candidate.meetingId,
     candidateId: candidate.candidateId,
     participantDisplayName: candidate.participantDisplayName,
+    displayName: candidate.displayName,
+    provisionalParticipantKey: candidate.provisionalParticipantKey,
     joinObservedAt: candidate.joinObservedAt,
     streamIds: candidate.streamIds,
     confidence: candidate.confidence,

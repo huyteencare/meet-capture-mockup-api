@@ -7,12 +7,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
 const capturesRoot = path.join(projectRoot, "captures");
+const debugLogPath = path.join(capturesRoot, "_debug", "identity-flow.log.jsonl");
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 8787);
 
 const { app, counters, activeSessions, ACTIVE_SESSION_TTL_MS, getCpuPercent } = createApp({
   capturesRoot,
   projectRoot,
+  debugLogPath,
   webhookUrl: process.env.TEENCAREWORK_ATTENDANCE_DRAFT_URL?.trim() || "",
   webhookSecret: process.env.TEENCAREWORK_ATTENDANCE_DRAFT_SECRET?.trim() || "",
 });
@@ -54,4 +56,5 @@ app.listen(port, host, () => {
   console.log(`Meet capture API listening on http://${host}:${port}`);
   console.log(`Captures root: ${capturesRoot}`);
   console.log(`Benchmark CSV: ${benchmarkCsvPath}`);
+  console.log(`Identity debug log: ${debugLogPath}`);
 });
