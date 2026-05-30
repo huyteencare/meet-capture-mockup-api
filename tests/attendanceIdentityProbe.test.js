@@ -179,6 +179,72 @@ describe("attendance identity probe unit behavior", () => {
     assert.equal(best?.participant?.signedinUser?.user, "users/student");
   });
 
+  it("treats low-confidence dirty candidate names as ambiguous when multiple signed-in sessions score", async () => {
+    const logs = [];
+    const probe = createAttendanceIdentityProbe({
+      logger: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+      },
+      config: {
+        enabled: true,
+        credentialsPath: "/tmp/fake-creds.json",
+        delegatedAdminEmail: "admin@example.com",
+        retryCount: 1,
+        retryDelayMs: 0,
+        timeMatchWindowMs: 600_000,
+      },
+      clientFactory: async () => ({
+        meet: {
+          conferenceRecords: {
+            list: async () => ({
+              data: {
+                conferenceRecords: [{ name: "conferenceRecords/1", startTime: "2026-05-29T08:20:00.000Z", endTime: "2026-05-29T09:00:00.000Z" }],
+              },
+            }),
+            participants: {
+              list: async () => ({
+                data: {
+                  participants: [
+                    { name: "conferenceRecords/1/participants/1", signedinUser: { displayName: "Ducchuy", user: "users/111" } },
+                    { name: "conferenceRecords/1/participants/2", signedinUser: { displayName: "Another Account Just", user: "users/222" } },
+                  ],
+                },
+              }),
+              participantSessions: {
+                list: async ({ parent }) => ({
+                  data: {
+                    participantSessions: [{
+                      name: `${parent}/participantSessions/1`,
+                      startTime: "2026-05-29T08:35:50.000Z",
+                      endTime: "2026-05-29T08:36:30.000Z"
+                    }],
+                  },
+                }),
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    probe.scheduleBatch({
+      meetingId: "abc-defg-hij",
+      candidates: [makeAttendanceCandidatePayload({
+        participantDisplayName: "Tuỳ chọn khác cho Another Account Just",
+        displayName: "Tuỳ chọn khác cho Another Account Just",
+        displayNameSource: "aria-label",
+        displayNameConfidence: "low",
+        joinObservedAt: "2026-05-29T08:35:59.000Z",
+      })],
+    });
+
+    await flush();
+    assert.ok(logs.some((line) => line.includes("\"finalVerdict\":\"ambiguous_participant_session\"")));
+    assert.ok(!logs.some((line) => line.includes("\"identitySignals\":{\"signedinUserUser\":\"users/111\"}")));
+    assert.ok(!logs.some((line) => line.includes("\"identitySignals\":{\"signedinUserUser\":\"users/222\"}")));
+  });
+
   it("retries unresolved probes up to the configured limit", async () => {
     const scheduled = [];
     let probeCalls = 0;
@@ -318,6 +384,63 @@ describe("attendance identity probe unit behavior", () => {
     assert.ok(logs.some((line) => line.includes("\"participantType\":\"signedinUser\"")));
     assert.ok(logs.some((line) => line.includes("\"signedinUserUser\":\"users/12345\"")));
     assert.ok(logs.some((line) => line.includes("\"finalVerdict\":\"matched_signedin_user\"")));
+  });
+
+  it("allows a single scored signed-in session to finalize even when the candidate has no usable name", async () => {
+    const logs = [];
+    const probe = createAttendanceIdentityProbe({
+      logger: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+      },
+      config: {
+        enabled: true,
+        credentialsPath: "/tmp/fake-creds.json",
+        delegatedAdminEmail: "admin@example.com",
+        retryCount: 1,
+        retryDelayMs: 0,
+        timeMatchWindowMs: 600_000,
+      },
+      clientFactory: async () => ({
+        meet: {
+          conferenceRecords: {
+            list: async () => ({
+              data: {
+                conferenceRecords: [{ name: "conferenceRecords/1", startTime: "2026-05-21T01:55:00.000Z", endTime: "2026-05-21T03:00:00.000Z" }],
+              },
+            }),
+            participants: {
+              list: async () => ({
+                data: {
+                  participants: [{ name: "conferenceRecords/1/participants/1", signedinUser: { displayName: "Student One", user: "users/12345" } }],
+                },
+              }),
+              participantSessions: {
+                list: async () => ({
+                  data: {
+                    participantSessions: [{ name: "conferenceRecords/1/participants/1/participantSessions/1", startTime: "2026-05-21T01:59:50.000Z", endTime: "2026-05-21T02:30:00.000Z" }],
+                  },
+                }),
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    probe.scheduleBatch({
+      meetingId: "abc-defg-hij",
+      candidates: [makeAttendanceCandidatePayload({
+        participantDisplayName: "unknown",
+        displayName: "unknown",
+        displayNameSource: "unknown",
+        displayNameConfidence: "low",
+      })],
+    });
+
+    await flush();
+    assert.ok(logs.some((line) => line.includes("\"finalVerdict\":\"matched_signedin_user\"")));
+    assert.ok(logs.some((line) => line.includes("\"signedinUserUser\":\"users/12345\"")));
   });
 
   it("logs anonymous_or_phone for anonymous participants without throwing", async () => {

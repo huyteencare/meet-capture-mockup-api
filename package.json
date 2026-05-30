@@ -5,14 +5,16 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env src/server.js",
-    "test": "node --env-file=.env --test"
+    "test": "node --env-file=.env --test test/checkin.test.js"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",
+    "@supabase/supabase-js": "^2.49.4",
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "googleapis": "^172.0.0",
-    "morgan": "^1.10.1"
+    "morgan": "^1.10.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "supertest": "^7.2.2"

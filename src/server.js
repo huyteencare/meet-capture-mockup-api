@@ -1,4 +1,5 @@
 import { createApp, getDiskUsageBytes } from "./app.js";
+import { createLmsClient } from "./supabase-db.js";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,12 +12,17 @@ const debugLogPath = path.join(capturesRoot, "_debug", "identity-flow.log.jsonl"
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 8787);
 
+const lmsSupabase = (() => {
+  try { return createLmsClient(process.env); } catch { return null; }
+})();
+
 const { app, counters, activeSessions, ACTIVE_SESSION_TTL_MS, getCpuPercent } = createApp({
   capturesRoot,
   projectRoot,
   debugLogPath,
   webhookUrl: process.env.TEENCAREWORK_ATTENDANCE_DRAFT_URL?.trim() || "",
   webhookSecret: process.env.TEENCAREWORK_ATTENDANCE_DRAFT_SECRET?.trim() || "",
+  lmsSupabase,
 });
 
 await mkdir(capturesRoot, { recursive: true });

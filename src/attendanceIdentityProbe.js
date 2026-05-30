@@ -34,6 +34,8 @@ export const normalizeProbeCandidate = (meetingId, candidate = {}) => {
   const participantDisplayName = clampString(candidate.participantDisplayName, 255) || "unknown";
   const displayName = clampString(candidate.displayName || candidate.participantDisplayName, 255) || "unknown";
   const provisionalParticipantKey = clampString(candidate.provisionalParticipantKey, 255) || null;
+  const displayNameSource = clampString(candidate.displayNameSource, 64) || "unknown";
+  const displayNameConfidence = clampString(candidate.displayNameConfidence, 16) || "low";
   const joinObservedAt = clampString(candidate.joinObservedAt, 64);
   if (!meetingId || !candidateId || !joinObservedAt) return null;
   return {
@@ -42,6 +44,8 @@ export const normalizeProbeCandidate = (meetingId, candidate = {}) => {
     participantDisplayName,
     displayName,
     provisionalParticipantKey,
+    displayNameSource,
+    displayNameConfidence,
     joinObservedAt,
     streamIds: Array.isArray(candidate.evidence?.streamIds) ? candidate.evidence.streamIds.map((value) => String(value)) : [],
     confidence: Number(candidate.confidence || 0),
@@ -66,6 +70,13 @@ const participantDisplayNameOf = (participant = {}) =>
   participant.anonymousUser?.displayName ||
   participant.phoneUser?.displayName ||
   "";
+
+const candidateHasUsableName = (candidate = {}) => {
+  const participantDisplayName = String(candidate.participantDisplayName || "").trim();
+  if (!participantDisplayName || participantDisplayName === "unknown") return false;
+  const confidence = String(candidate.displayNameConfidence || "").trim().toLowerCase();
+  return confidence === "high" || confidence === "medium";
+};
 
 export const buildProbeConfigFromEnv = (env = process.env) => ({
   enabled: toBoolean(env.GOOGLE_MEET_IDENTITY_PROBE_ENABLED),
@@ -223,6 +234,7 @@ const summarizeScoredCandidate = (entry) => {
 };
 
 const deriveMatchOutcome = (verdict, match) => {
+  if (verdict === "ambiguous_participant_session") return "ambiguous_participant_session";
   if (!match) return verdict === "no_matching_participant_session" ? "no_matching_participant_session" : "unmatched";
   if (match.participantType === "signedinUser") return "matched_signedin_user";
   if (match.participantType === "anonymousUser" || match.participantType === "phoneUser") return "matched_anonymous_or_phone";
@@ -238,6 +250,8 @@ const makeLogPayload = ({ attempt, maxAttempts, candidate, conferenceRecord, mat
     participantDisplayName: candidate.participantDisplayName,
     displayName: candidate.displayName,
     provisionalParticipantKey: candidate.provisionalParticipantKey,
+    displayNameSource: candidate.displayNameSource,
+    displayNameConfidence: candidate.displayNameConfidence,
     joinObservedAt: candidate.joinObservedAt,
     streamIds: candidate.streamIds,
     confidence: candidate.confidence,
@@ -247,11 +261,37 @@ const makeLogPayload = ({ attempt, maxAttempts, candidate, conferenceRecord, mat
   matchOutcome: deriveMatchOutcome(verdict, match),
   candidateScoreboard: Array.isArray(scoredCandidates) ? scoredCandidates.slice(0, 10).map(summarizeScoredCandidate) : [],
   matchedParticipant: summarizeMatch(match),
-  identitySignals: { signedinUserUser: match?.participant?.signedinUser?.user || null },
+  identitySignals: { signedinUserUser: verdict === "matched_signedin_user" ? match?.participant?.signedinUser?.user || null : null },
   finalVerdict: verdict,
   retryScheduled: !!retryScheduled,
   error: error ? { message: error.message } : null,
 });
+
+const shouldFinalizeSignedInMatch = ({ candidate, match, scoredCandidates = [] }) => {
+  if (!match || match.participantType !== "signedinUser") {
+    return { finalize: false, reason: "not-signedin-match", hasUsableName: false, runnerUpDistanceMs: null };
+  }
+
+  const hasUsableName = candidateHasUsableName(candidate);
+  const topHasExactNameMatch = !!match.tieBreakNameMatch && match.distanceMs <= NAME_MATCH_NEAR_THRESHOLD_MS;
+  const runnerUp = Array.isArray(scoredCandidates) && scoredCandidates.length > 1 ? scoredCandidates[1] : null;
+  const runnerUpDistanceMs = runnerUp ? runnerUp.distanceMs : null;
+
+  if (hasUsableName && topHasExactNameMatch) {
+    return { finalize: true, reason: "usable-exact-name-match", hasUsableName, runnerUpDistanceMs };
+  }
+
+  if (!hasUsableName && Array.isArray(scoredCandidates) && scoredCandidates.length === 1) {
+    return { finalize: true, reason: "single-scored-session", hasUsableName, runnerUpDistanceMs };
+  }
+
+  return {
+    finalize: false,
+    reason: hasUsableName ? "usable-name-without-exact-near-match" : "ambiguous-scored-session",
+    hasUsableName,
+    runnerUpDistanceMs
+  };
+};
 
 const createLogger = (logger = console) => ({
   log(payload) {
@@ -347,6 +387,17 @@ export const runGoogleIdentityProbeAttempt = async ({ candidate, clients, timeMa
 
   if (match.participantType === "anonymousUser" || match.participantType === "phoneUser") {
     return { verdict: "anonymous_or_phone", conferenceRecord, match, scoredCandidates, shouldRetry: false };
+  }
+
+  const finalizeDecision = shouldFinalizeSignedInMatch({ candidate, match, scoredCandidates });
+  if (!finalizeDecision.finalize) {
+    return {
+      verdict: "ambiguous_participant_session",
+      conferenceRecord,
+      match,
+      scoredCandidates,
+      shouldRetry: false
+    };
   }
 
   return { verdict: "matched_signedin_user", conferenceRecord, match, scoredCandidates, shouldRetry: false };

@@ -4,6 +4,9 @@ import { isConfigured as isStorageConfigured } from "./storage.js";
 import { createCaptureRouter } from "./routes/capture.js";
 import { createDashboardRouter } from "./routes/dashboard.js";
 import { createDebugRouter } from "./routes/debug.js";
+import { createCheckinRouter } from "./routes/checkin.js";
+import { createLinkRouter } from "./routes/link.js";
+import { createAutoCheckinRouter } from "./routes/auto-checkin.js";
 import { createSessionsRouter } from "./routes/sessions.js";
 import express from "express";
 import morgan from "morgan";
@@ -215,17 +218,20 @@ const normalizeIdentityProbeResult = (result = {}) => {
   const identitySignals = result.identitySignals || {};
   const candidateId = String(candidate.candidateId || "").trim().slice(0, 240);
   if (!candidateId) return null;
+  const signedinUserUser = String(identitySignals.signedinUserUser || matchedParticipant.signedinUserUser || "").trim().slice(0, 240) || null;
+  const probeStatus = String(result.matchOutcome || result.finalVerdict || "unknown").trim().slice(0, 64) || "unknown";
+  const canBindCanonicalIdentity = probeStatus === "matched_signedin_user" && !!signedinUserUser;
   return {
     candidateId,
     participantDisplayName: String(candidate.participantDisplayName || "").trim().slice(0, 255) || "unknown",
     displayName: String(candidate.displayName || candidate.participantDisplayName || "").trim().slice(0, 255) || "unknown",
     provisionalParticipantKey: String(candidate.provisionalParticipantKey || "").trim().slice(0, 255) || null,
-    probeStatus: String(result.matchOutcome || result.finalVerdict || "unknown").trim().slice(0, 64) || "unknown",
+    probeStatus,
     finalVerdict: String(result.finalVerdict || "").trim().slice(0, 64) || null,
     participantType: String(matchedParticipant.participantType || "").trim().slice(0, 64) || null,
-    signedinUserUser: String(identitySignals.signedinUserUser || matchedParticipant.signedinUserUser || "").trim().slice(0, 240) || null,
-    canonicalIdentityType: String(identitySignals.signedinUserUser || matchedParticipant.signedinUserUser || "").trim() ? "signedinUser.user" : null,
-    canonicalIdentityValue: String(identitySignals.signedinUserUser || matchedParticipant.signedinUserUser || "").trim().slice(0, 240) || null,
+    signedinUserUser: canBindCanonicalIdentity ? signedinUserUser : null,
+    canonicalIdentityType: canBindCanonicalIdentity ? "signedinUser.user" : null,
+    canonicalIdentityValue: canBindCanonicalIdentity ? signedinUserUser : null,
     lastProbedAt: new Date().toISOString(),
     retryScheduled: Boolean(result.retryScheduled),
   };
@@ -279,12 +285,15 @@ const forwardAttendanceCandidates = (webhookUrl, webhookSecret) => async ({ meet
 const getChunkStorageInfo = (payload, fallbackBaseName) => {
   const mediaRole = String(payload.mediaRole || "").trim();
   const streamId = sanitizeSegment(payload.streamId, "stream");
+  const participantStorageKey = sanitizeSegment(payload.participantStorageKey, "");
   const participantId = sanitizeSegment(payload.participantId, streamId);
   const safeIndex = String(Number(payload.index ?? 0)).padStart(6, "0");
   const baseName = `chunk-${safeIndex}-${fallbackBaseName}`;
   if (mediaRole === "mentor-audio") return { dirParts: ["mentor-audio"], fileName: `${baseName}.webm` };
   if (mediaRole === "shared-audio") return { dirParts: ["shared-audio"], fileName: `${baseName}.webm` };
-  if (mediaRole === "student-video") return { dirParts: ["participants", participantId, "video"], fileName: `${baseName}.webm` };
+  if (mediaRole === "student-video") {
+    return { dirParts: ["participants", participantStorageKey || participantId, "video"], fileName: `${baseName}.webm` };
+  }
   return { dirParts: ["recordings"], fileName: `${fallbackBaseName}.bin` };
 };
 
@@ -371,7 +380,7 @@ export const saveEvent = (capturesRoot) => async (sessionDir, event, index) => {
   if (event.type === "chunk") {
     if (payload.storageKey || payload.s3Key) {
       saved.files.recording = payload.storageKey || payload.s3Key;
-      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || "", chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), byteSize: Number(payload.byteSize || 0), uploadedDirectly: true, ...chunkIdentityMeta };
+      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, participantStorageKey: payload.participantStorageKey || null, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || "", chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), byteSize: Number(payload.byteSize || 0), uploadedDirectly: true, ...chunkIdentityMeta };
     } else if (payload.data) {
       const { buffer, mimeType } = parseDataUrl(payload.data);
       const storage = getChunkStorageInfo(payload, baseName);
@@ -382,9 +391,9 @@ export const saveEvent = (capturesRoot) => async (sessionDir, event, index) => {
       const chunkPath = path.join(chunkDir, fileName);
       await writeFile(chunkPath, buffer);
       saved.files.recording = path.relative(sessionDir, chunkPath);
-      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || mimeType, chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), byteSize: buffer.byteLength, ...chunkIdentityMeta };
+      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, participantStorageKey: payload.participantStorageKey || null, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || mimeType, chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), byteSize: buffer.byteLength, ...chunkIdentityMeta };
     } else {
-      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || "", chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), ...chunkIdentityMeta };
+      saved.metadata = { streamId: payload.streamId, participantId: payload.participantId, participantStorageKey: payload.participantStorageKey || null, kind: payload.kind, mediaRole: payload.mediaRole, trackSource: payload.trackSource, mimeType: payload.mimeType || "", chunkStartedAt: Number(payload.chunkStartedAt || 0) || null, chunkEndedAt: Number(payload.chunkEndedAt || 0) || null, durationMs: Number(payload.durationMs || 0), initChunk: Boolean(payload.initChunk), index: Number(payload.index || 0), ...chunkIdentityMeta };
     }
     return saved;
   }
@@ -428,7 +437,7 @@ export const saveEvent = (capturesRoot) => async (sessionDir, event, index) => {
   return saved;
 };
 
-export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookSecret = "", attendanceIdentityProbe, debugLogPath } = {}) {
+export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookSecret = "", attendanceIdentityProbe, debugLogPath, lmsSupabase = null } = {}) {
   const counters = { totalBatchRequests: 0, totalEvents: 0, totalBytesReceived: 0, totalSavedFiles: 0, totalErrors: 0, totalS3Uploads: 0, totalS3Errors: 0, totalS3BytesUploaded: 0 };
   const activeSessions = new Map();
   const ACTIVE_SESSION_TTL_MS = 5 * 60 * 1000;
@@ -487,6 +496,12 @@ export function createApp({ capturesRoot, projectRoot, webhookUrl = "", webhookS
     capturesRoot, sanitizeSegment,
     enrichManifest: enrichManifest(capturesRoot),
   }));
+
+  if (lmsSupabase) {
+    app.use(createCheckinRouter({ lmsSupabase }));
+    app.use(createLinkRouter({ lmsSupabase }));
+    app.use(createAutoCheckinRouter({ lmsSupabase }));
+  }
 
   app.use((error, _req, res, _next) => {
     counters.totalErrors += 1;
