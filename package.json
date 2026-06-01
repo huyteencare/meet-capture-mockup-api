@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env src/server.js",
-    "test": "node --env-file=.env --test test/checkin.test.js"
+    "test": "node --env-file=.env --test test/checkin.test.js",
+    "deploy": "rsync -avz --progress --exclude='node_modules' --exclude='captures' --exclude='.env' --exclude='.env.local' --exclude='.git' --exclude='reports' --exclude='benchmark-*.csv' --exclude='benchmark-viewer.html' -e 'ssh -i ~/.ssh/id_ed25519' /home/huy/workspace/teencare/meet-capture-api/ root@160.191.244.71:/home/projects/meet-capture-api/ && ssh -i ~/.ssh/id_ed25519 root@160.191.244.71 'cd /home/projects/meet-capture-api && npm install --omit=dev && pm2 restart meet-capture-api'"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",

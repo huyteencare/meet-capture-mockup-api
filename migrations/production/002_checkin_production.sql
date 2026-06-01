@@ -11,12 +11,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS meet_attendance_session_participant_no_log
   ON meet_attendance (session_id, participant_email)
   WHERE meet_log_id IS NULL;
 
--- 3. Unique constraint cho kns_attendance_manual
---    Kiểm tra trước khi chạy:
---    SELECT indexname FROM pg_indexes WHERE tablename = 'kns_attendance_manual';
-ALTER TABLE kns_attendance_manual
-  ADD CONSTRAINT IF NOT EXISTS kns_attendance_manual_session_student_unique
-  UNIQUE (session_id, student_email);
+-- 3. Unique index cho kns_attendance_manual
+CREATE UNIQUE INDEX IF NOT EXISTS kns_attendance_manual_session_student_unique
+  ON kns_attendance_manual (session_id, student_email);
 
 -- 4. source constraint mở rộng để cho phép 'extension'
 ALTER TABLE kns_attendance_manual

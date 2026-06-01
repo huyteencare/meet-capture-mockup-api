@@ -9,8 +9,8 @@ const DEV_URL = process.env.SUPABASE_LMS_URL;
 const DEV_KEY = process.env.SUPABASE_LMS_KEY;
 const SERVICE_KEY = process.env.SUPABASE_LMS_SERVICE_KEY;
 
-if (!DEV_URL || !DEV_KEY) {
-  console.error('SUPABASE_LMS_URL and SUPABASE_LMS_KEY must be set in .env');
+if (!DEV_URL) {
+  console.error('SUPABASE_LMS_URL must be set in .env');
   process.exit(1);
 }
 if (!SERVICE_KEY) {

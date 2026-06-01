@@ -58,6 +58,10 @@ curl http://160.191.244.71:8787/health
 | GET | `/api/sessions` | List all recorded sessions |
 | GET | `/api/sessions/:sessionId` | Get session detail + manifest |
 | GET | `/captures/*` | Serve static capture files |
+| POST | `/api/checkin` | Manual check-in (teacher or student) |
+| POST | `/api/auto-checkin` | Auto check-in by Google handle → email lookup → write attendance |
+| POST | `/api/link-student` | Save Google handle → email mapping to DB |
+| GET | `/api/student-by-handle/:handle` | Lookup email by Google handle |
 
 ## PM2 logs
 
