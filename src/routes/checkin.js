@@ -2,6 +2,8 @@ import { Router } from 'express';
 import {
   lookupMentor1on1Session,
   lookupKnsSession,
+  markMentor1on1SessionCompleted,
+  syncKnsClassinAttendance,
   upsertMeetAttendance,
   upsertKnsAttendance,
 } from '../supabase-db.js';
@@ -27,7 +29,24 @@ export function createCheckinRouter({ lmsSupabase }) {
           participantType: participantType || PARTICIPANT_TYPE.STUDENT,
           joinTime: now,
         });
+        const sessionSync = await markMentor1on1SessionCompleted(lmsSupabase, session);
+        console.info('[Checkin] mentor_1_1 matched', {
+          meetCode,
+          sessionId: session.id,
+          participantEmail,
+          participantType: participantType || PARTICIPANT_TYPE.STUDENT,
+          attendanceId: record.id,
+          sessionSync,
+        });
         return res.json({ ok: true, type: SESSION_TYPE.MENTOR_1_1, attendanceId: record.id });
+      }
+
+      if ((participantType || PARTICIPANT_TYPE.STUDENT) === PARTICIPANT_TYPE.MENTOR) {
+        console.warn('[Checkin] mentor attempted KNS fallback and was rejected', {
+          meetCode,
+          participantEmail,
+        });
+        return res.json({ ok: false, status: 'session_not_found' });
       }
 
       const knsSession = await lookupKnsSession(lmsSupabase, meetCode, now);
@@ -37,6 +56,29 @@ export function createCheckinRouter({ lmsSupabase }) {
           studentEmail: participantEmail,
           markedAt: now,
         });
+        const classinSync = await syncKnsClassinAttendance(lmsSupabase, {
+          session: knsSession,
+          studentEmail: participantEmail,
+        });
+        if (classinSync.updated) {
+          console.info('[Checkin] kns matched and synced', {
+            meetCode,
+            sessionId: knsSession.id,
+            className: knsSession.class_name,
+            studentEmail: participantEmail,
+            attendanceId: record.id,
+            classinSync,
+          });
+        } else {
+          console.warn('[Checkin] kns matched but classin sync missed', {
+            meetCode,
+            sessionId: knsSession.id,
+            className: knsSession.class_name,
+            studentEmail: participantEmail,
+            attendanceId: record.id,
+            classinSync,
+          });
+        }
         return res.json({ ok: true, type: SESSION_TYPE.KNS, attendanceId: record.id });
       }
 

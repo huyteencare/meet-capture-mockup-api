@@ -11,7 +11,9 @@ export function createLmsClient(env) {
 }
 
 const COMPLETED_STATUSES = new Set(['completed', 'cancelled', 'canceled']);
+const AUTO_PRESENT_ELIGIBLE_SESSION_STATUSES = new Set(['scheduled', 'in_progress', 'reserved', 'draft']);
 const MAX_MEETING_MATCH_DISTANCE_MS = 12 * 60 * 60 * 1000;
+const KNS_CLASSIN_SYNC_WINDOW_MS = 90 * 60 * 1000;
 
 function parseTimeMs(value) {
   if (!value) return Number.NaN;
@@ -94,7 +96,7 @@ export async function lookupMentor1on1Session(supabase, meetCode, observedAt) {
 export async function lookupKnsSession(supabase, meetCode, observedAt) {
   const { data, error } = await supabase
     .from('kns_class_sessions')
-    .select('id, meeting_url, session_date, start_at, end_at, updated_at, created_at')
+    .select('id, class_name, meeting_url, session_date, start_at, end_at, updated_at, created_at')
     .like('meeting_url', `%${meetCode}%`)
     .limit(20);
   // 42703 = column does not exist (meeting_url not yet migrated) → treat as no match
@@ -131,6 +133,46 @@ export async function upsertMeetAttendance(supabase, { sessionId, participantEma
   return data;
 }
 
+export async function markMentor1on1SessionCompleted(supabase, session) {
+  const nextStatus = String(session?.status || '').toLowerCase();
+  if (!session?.id || !AUTO_PRESENT_ELIGIBLE_SESSION_STATUSES.has(nextStatus)) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: 'status_not_eligible',
+      previousStatus: session?.status ?? null,
+      nextStatus: session?.status ?? null,
+    };
+  }
+
+  const { data, error } = await supabase
+    .from('sessions')
+    .update({ status: 'completed' })
+    .eq('id', session.id)
+    .in('status', Array.from(AUTO_PRESENT_ELIGIBLE_SESSION_STATUSES))
+    .select('id, status')
+    .maybeSingle();
+  if (error) throw error;
+
+  if (!data) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: 'status_changed_concurrently',
+      previousStatus: session.status ?? null,
+      nextStatus: null,
+    };
+  }
+
+  return {
+    updated: true,
+    skipped: false,
+    reason: null,
+    previousStatus: session.status ?? null,
+    nextStatus: data.status ?? 'completed',
+  };
+}
+
 export async function upsertKnsAttendance(supabase, { sessionId, studentEmail, markedAt }) {
   const { data: existing } = await supabase
     .from('kns_attendance_manual')
@@ -153,6 +195,77 @@ export async function upsertKnsAttendance(supabase, { sessionId, studentEmail, m
     .single();
   if (error) throw error;
   return data;
+}
+
+export async function syncKnsClassinAttendance(supabase, { session, studentEmail }) {
+  const normalizedEmail = String(studentEmail || '').trim().toLowerCase();
+  const className = String(session?.class_name || '').trim();
+  const startAt = session?.start_at || null;
+  if (!session?.id || !normalizedEmail || !className || !startAt) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: 'missing_match_inputs',
+      matchedRowId: null,
+    };
+  }
+
+  const sessionStartMs = parseTimeMs(startAt);
+  if (!Number.isFinite(sessionStartMs)) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: 'invalid_session_start',
+      matchedRowId: null,
+    };
+  }
+
+  const { data, error } = await supabase
+    .from('kns_classin')
+    .select('id, class_name, lesson_name, start_time, attendance')
+    .eq('student_email', normalizedEmail)
+    .eq('class_name', className)
+    .order('start_time', { ascending: false })
+    .limit(20);
+  if (error) throw error;
+
+  const rows = Array.isArray(data) ? data : [];
+  let bestRow = null;
+  let bestDiffMs = Number.POSITIVE_INFINITY;
+  for (const row of rows) {
+    const rowStartMs = parseTimeMs(row.start_time);
+    if (!Number.isFinite(rowStartMs)) continue;
+    const diffMs = Math.abs(rowStartMs - sessionStartMs);
+    if (diffMs > KNS_CLASSIN_SYNC_WINDOW_MS) continue;
+    if (diffMs < bestDiffMs) {
+      bestDiffMs = diffMs;
+      bestRow = row;
+    }
+  }
+
+  if (!bestRow) {
+    return {
+      updated: false,
+      skipped: true,
+      reason: 'matching_classin_row_not_found',
+      matchedRowId: null,
+    };
+  }
+
+  const { data: updatedRow, error: updateError } = await supabase
+    .from('kns_classin')
+    .update({ attendance: KNS_ATTENDANCE_VALUE })
+    .eq('id', bestRow.id)
+    .select('id, attendance')
+    .single();
+  if (updateError) throw updateError;
+
+  return {
+    updated: true,
+    skipped: false,
+    reason: null,
+    matchedRowId: updatedRow.id,
+  };
 }
 
 export async function upsertHandleMapping(supabase, { googleHandle, studentEmail, displayName, linkedBy, role }) {
@@ -214,17 +327,55 @@ export async function autoCheckin(supabase, { googleHandle, meetCode, joinTime }
 
   const participantEmail = mapping.student_email;
   const now = joinTime || new Date().toISOString();
+  const participantType = mapping.role === 'mentor' ? PARTICIPANT_TYPE.MENTOR : PARTICIPANT_TYPE.STUDENT;
 
   const session = await lookupMentor1on1Session(supabase, meetCode, now);
   if (session) {
-    const participantType = mapping.role === 'mentor' ? PARTICIPANT_TYPE.MENTOR : PARTICIPANT_TYPE.STUDENT;
     const record = await upsertMeetAttendance(supabase, { sessionId: session.id, participantEmail, participantType, joinTime: now });
+    const sessionSync = await markMentor1on1SessionCompleted(supabase, session);
+    console.info('[AutoCheckin] mentor_1_1 matched', {
+      meetCode,
+      sessionId: session.id,
+      participantEmail,
+      participantType,
+      attendanceId: record.id,
+      sessionSync,
+    });
     return { ok: true, type: SESSION_TYPE.MENTOR_1_1, attendanceId: record.id };
+  }
+
+  if (participantType === PARTICIPANT_TYPE.MENTOR) {
+    console.warn('[AutoCheckin] mentor attempted KNS fallback and was rejected', {
+      meetCode,
+      googleHandle,
+      participantEmail,
+    });
+    return { ok: false, status: 'session_not_found' };
   }
 
   const knsSession = await lookupKnsSession(supabase, meetCode, now);
   if (knsSession) {
     const record = await upsertKnsAttendance(supabase, { sessionId: knsSession.id, studentEmail: participantEmail, markedAt: now });
+    const classinSync = await syncKnsClassinAttendance(supabase, { session: knsSession, studentEmail: participantEmail });
+    if (classinSync.updated) {
+      console.info('[AutoCheckin] kns matched and synced', {
+        meetCode,
+        sessionId: knsSession.id,
+        className: knsSession.class_name,
+        studentEmail: participantEmail,
+        attendanceId: record.id,
+        classinSync,
+      });
+    } else {
+      console.warn('[AutoCheckin] kns matched but classin sync missed', {
+        meetCode,
+        sessionId: knsSession.id,
+        className: knsSession.class_name,
+        studentEmail: participantEmail,
+        attendanceId: record.id,
+        classinSync,
+      });
+    }
     return { ok: true, type: SESSION_TYPE.KNS, attendanceId: record.id };
   }
 

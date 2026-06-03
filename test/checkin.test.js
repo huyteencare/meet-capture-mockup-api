@@ -27,11 +27,14 @@ let duplicateCurrentSessionId;
 let duplicateOldSessionId;
 let staleSessionId;
 let knsSessionId;
+let knsNoClassinSessionId;
+let knsClassinRowId;
 let knsAvailable = false;
 const TEST_MEET_CODE = 'tst-chk-001';
 const TEST_DUP_MEET_CODE = 'tst-chk-dup-001';
 const TEST_STALE_MEET_CODE = 'tst-chk-stale-001';
 const TEST_KNS_CODE = 'tst-kns-001';
+const TEST_KNS_NO_CLASSIN_CODE = 'tst-kns-no-classin-001';
 const TEST_EMAIL = 'test-student@example.com';
 const NOW = new Date().toISOString();
 const ONE_HOUR_LATER = new Date(Date.now() + 3600_000).toISOString();
@@ -48,6 +51,7 @@ before(async () => {
       type: 'mentor_1_1',
       scheduled_start: NOW,
       scheduled_end: ONE_HOUR_LATER,
+      status: 'scheduled',
     })
     .select('id')
     .single();
@@ -116,6 +120,36 @@ before(async () => {
     assert.ok(!e2, `seed kns_class_sessions: ${e2?.message}`);
     knsSessionId = s2.id;
     knsAvailable = true;
+
+    const { data: classinRow, error: classinError } = await db
+      .from('kns_classin')
+      .insert({
+        class_name: 'Test KNS',
+        lesson_name: 'Test KNS - 1',
+        start_time: NOW,
+        end_time: ONE_HOUR_LATER,
+        student_email: TEST_EMAIL,
+        student_name: 'Test Student',
+        attendance: 'Absence',
+      })
+      .select('id')
+      .single();
+    assert.ok(!classinError, `seed kns_classin: ${classinError?.message}`);
+    knsClassinRowId = classinRow.id;
+
+    const { data: s3, error: e3 } = await db
+      .from('kns_class_sessions')
+      .insert({
+        class_name: 'Test KNS No Classin',
+        meeting_url: `https://meet.google.com/${TEST_KNS_NO_CLASSIN_CODE}`,
+        session_date: NOW.slice(0, 10),
+        start_at: NOW,
+        end_at: NOW,
+      })
+      .select('id')
+      .single();
+    assert.ok(!e3, `seed kns_class_sessions no classin: ${e3?.message}`);
+    knsNoClassinSessionId = s3.id;
   }
 });
 
@@ -125,10 +159,15 @@ after(async () => {
   await db.from('meet_attendance').delete().in('session_id', [duplicateCurrentSessionId, duplicateOldSessionId]);
   await db.from('meet_attendance').delete().eq('session_id', staleSessionId);
   await db.from('kns_attendance_manual').delete().eq('session_id', knsSessionId);
+  await db.from('kns_attendance_manual').delete().eq('session_id', knsNoClassinSessionId);
+  if (knsClassinRowId) {
+    await db.from('kns_classin').delete().eq('id', knsClassinRowId);
+  }
   await db.from('sessions').delete().eq('id', mentor1on1SessionId);
   await db.from('sessions').delete().in('id', [duplicateCurrentSessionId, duplicateOldSessionId]);
   await db.from('sessions').delete().eq('id', staleSessionId);
   await db.from('kns_class_sessions').delete().eq('id', knsSessionId);
+  await db.from('kns_class_sessions').delete().eq('id', knsNoClassinSessionId);
 });
 
 test('POST /api/checkin — missing fields returns 400', async () => {
@@ -160,6 +199,13 @@ test('POST /api/checkin — Mentor 1:1 writes meet_attendance', async () => {
   assert.equal(data.participant_type, 'student');
   assert.equal(data.duration_seconds, 0);
   assert.equal(data.meet_log_id, null);
+
+  const { data: session } = await db
+    .from('sessions')
+    .select('status')
+    .eq('id', mentor1on1SessionId)
+    .single();
+  assert.equal(session.status, 'completed');
 });
 
 test('POST /api/checkin — duplicate check-in is idempotent', async () => {
@@ -238,6 +284,57 @@ test('POST /api/checkin — KNS writes kns_attendance_manual', { skip: !knsAvail
   assert.ok(data);
   assert.equal(data.attendance, 'Attendance');
   assert.equal(data.source, 'extension');
+
+  const { data: classinRow } = await db
+    .from('kns_classin')
+    .select('attendance')
+    .eq('id', knsClassinRowId)
+    .single();
+  assert.equal(classinRow.attendance, 'Attendance');
+});
+
+test('POST /api/checkin — KNS without raw classin row still succeeds without synthetic insert', { skip: !knsAvailable }, async () => {
+  const noClassinEmail = 'no-classin@example.com';
+  const res = await request(app).post('/api/checkin').send({
+    meetCode: TEST_KNS_NO_CLASSIN_CODE,
+    participantEmail: noClassinEmail,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.type, 'kns');
+
+  const { data: manual } = await db
+    .from('kns_attendance_manual')
+    .select('attendance')
+    .eq('session_id', knsNoClassinSessionId)
+    .eq('student_email', noClassinEmail)
+    .single();
+  assert.equal(manual.attendance, 'Attendance');
+
+  const { data: classinRows } = await db
+    .from('kns_classin')
+    .select('id')
+    .eq('student_email', noClassinEmail)
+    .eq('class_name', 'Test KNS No Classin');
+  assert.equal(classinRows.length, 0);
+});
+
+test('POST /api/checkin — mentor participant does not fallback to KNS', { skip: !knsAvailable }, async () => {
+  const res = await request(app).post('/api/checkin').send({
+    meetCode: TEST_KNS_CODE,
+    participantEmail: 'mentor@example.com',
+    participantType: 'mentor',
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.status, 'session_not_found');
+
+  const { data: manualRows } = await db
+    .from('kns_attendance_manual')
+    .select('id')
+    .eq('session_id', knsSessionId)
+    .eq('student_email', 'mentor@example.com');
+  assert.equal(manualRows.length, 0);
 });
 
 test('POST /api/checkin — unknown meetCode returns session_not_found', async () => {
@@ -355,6 +452,13 @@ test('POST /api/auto-checkin — writes meet_attendance for student role', async
     .eq('participant_email', TEST_EMAIL)
     .single();
   assert.equal(data.participant_type, 'student');
+
+  const { data: session } = await db
+    .from('sessions')
+    .select('status')
+    .eq('id', mentor1on1SessionId)
+    .single();
+  assert.equal(session.status, 'completed');
 });
 
 test('POST /api/auto-checkin — writes mentor participant_type for mentor role', async () => {
@@ -374,6 +478,22 @@ test('POST /api/auto-checkin — writes mentor participant_type for mentor role'
     .eq('participant_email', MENTOR_EMAIL)
     .single();
   assert.equal(data.participant_type, 'mentor');
+});
+
+test('POST /api/auto-checkin — mentor role does not fallback to KNS', { skip: !knsAvailable }, async () => {
+  const res = await request(app).post('/api/auto-checkin').send({
+    googleHandle: TEST_HANDLE_MENTOR,
+    meetCode: TEST_KNS_CODE,
+  });
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.status, 'session_not_found');
+
+  const { data } = await db
+    .from('kns_attendance_manual')
+    .select('id')
+    .eq('session_id', knsSessionId)
+    .eq('student_email', 'mentor@example.com');
+  assert.equal(data.length, 0);
 });
 
 test('POST /api/auto-checkin — session_not_found for unknown meetCode', async () => {
