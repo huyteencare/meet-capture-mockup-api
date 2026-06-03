@@ -23,13 +23,21 @@ const db = createClient(DEV_URL, SERVICE_KEY, { realtime: { transport: ws } });
 const { app } = createApp({ capturesRoot: '/tmp/test-captures', lmsSupabase: db });
 
 let mentor1on1SessionId;
+let duplicateCurrentSessionId;
+let duplicateOldSessionId;
+let staleSessionId;
 let knsSessionId;
 let knsAvailable = false;
 const TEST_MEET_CODE = 'tst-chk-001';
+const TEST_DUP_MEET_CODE = 'tst-chk-dup-001';
+const TEST_STALE_MEET_CODE = 'tst-chk-stale-001';
 const TEST_KNS_CODE = 'tst-kns-001';
 const TEST_EMAIL = 'test-student@example.com';
 const NOW = new Date().toISOString();
 const ONE_HOUR_LATER = new Date(Date.now() + 3600_000).toISOString();
+const YESTERDAY = new Date(Date.now() - 24 * 3600_000).toISOString();
+const TWO_HOURS_AGO = new Date(Date.now() - 2 * 3600_000).toISOString();
+const NINETY_MINUTES_AGO = new Date(Date.now() - 90 * 60_000).toISOString();
 
 before(async () => {
   // Seed mentor 1:1 session
@@ -45,6 +53,50 @@ before(async () => {
     .single();
   assert.ok(!e1, `seed sessions: ${e1?.message}`);
   mentor1on1SessionId = s1.id;
+
+  const { data: dupCurrent, error: dupCurrentError } = await db
+    .from('sessions')
+    .insert({
+      meeting_url: `https://meet.google.com/${TEST_DUP_MEET_CODE}`,
+      type: 'mentor_1_1',
+      scheduled_start: NOW,
+      scheduled_end: ONE_HOUR_LATER,
+      status: 'scheduled',
+    })
+    .select('id')
+    .single();
+  assert.ok(!dupCurrentError, `seed duplicate current session: ${dupCurrentError?.message}`);
+  duplicateCurrentSessionId = dupCurrent.id;
+
+  const { data: dupOld, error: dupOldError } = await db
+    .from('sessions')
+    .insert({
+      meeting_url: `https://meet.google.com/${TEST_DUP_MEET_CODE}`,
+      type: 'mentor_1_1',
+      scheduled_start: TWO_HOURS_AGO,
+      scheduled_end: NINETY_MINUTES_AGO,
+      status: 'completed',
+      updated_at: YESTERDAY,
+    })
+    .select('id')
+    .single();
+  assert.ok(!dupOldError, `seed duplicate old session: ${dupOldError?.message}`);
+  duplicateOldSessionId = dupOld.id;
+
+  const { data: staleSession, error: staleSessionError } = await db
+    .from('sessions')
+    .insert({
+      meeting_url: `https://meet.google.com/${TEST_STALE_MEET_CODE}`,
+      type: 'mentor_1_1',
+      scheduled_start: TWO_HOURS_AGO,
+      scheduled_end: NINETY_MINUTES_AGO,
+      status: 'completed',
+      updated_at: YESTERDAY,
+    })
+    .select('id')
+    .single();
+  assert.ok(!staleSessionError, `seed stale session: ${staleSessionError?.message}`);
+  staleSessionId = staleSession.id;
 
   // Seed KNS session — skipped if meeting_url column not yet migrated
   const { data: s2, error: e2 } = await db
@@ -70,8 +122,12 @@ before(async () => {
 after(async () => {
   // Clean up in reverse FK order
   await db.from('meet_attendance').delete().eq('session_id', mentor1on1SessionId);
+  await db.from('meet_attendance').delete().in('session_id', [duplicateCurrentSessionId, duplicateOldSessionId]);
+  await db.from('meet_attendance').delete().eq('session_id', staleSessionId);
   await db.from('kns_attendance_manual').delete().eq('session_id', knsSessionId);
   await db.from('sessions').delete().eq('id', mentor1on1SessionId);
+  await db.from('sessions').delete().in('id', [duplicateCurrentSessionId, duplicateOldSessionId]);
+  await db.from('sessions').delete().eq('id', staleSessionId);
   await db.from('kns_class_sessions').delete().eq('id', knsSessionId);
 });
 
@@ -121,6 +177,46 @@ test('POST /api/checkin — duplicate check-in is idempotent', async () => {
     .eq('session_id', mentor1on1SessionId)
     .eq('participant_email', TEST_EMAIL);
   assert.equal(data.length, 1, 'should not create duplicate records');
+});
+
+test('POST /api/checkin — duplicate meeting_url chooses current matching session', async () => {
+  const duplicateEmail = 'duplicate-meeting@example.com';
+  await db.from('meet_attendance').delete().in('session_id', [duplicateCurrentSessionId, duplicateOldSessionId]).eq('participant_email', duplicateEmail);
+
+  const res = await request(app).post('/api/checkin').send({
+    meetCode: TEST_DUP_MEET_CODE,
+    participantEmail: duplicateEmail,
+    joinTime: NOW,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.type, 'mentor_1_1');
+
+  const { data: currentAttendance } = await db
+    .from('meet_attendance')
+    .select('id')
+    .eq('session_id', duplicateCurrentSessionId)
+    .eq('participant_email', duplicateEmail)
+    .maybeSingle();
+  assert.ok(currentAttendance, 'should write attendance to the current session');
+
+  const { data: oldAttendance } = await db
+    .from('meet_attendance')
+    .select('id')
+    .eq('session_id', duplicateOldSessionId)
+    .eq('participant_email', duplicateEmail);
+  assert.equal(oldAttendance.length, 0, 'should not write attendance to the older duplicate session');
+});
+
+test('POST /api/checkin — stale completed session with reused meeting_url returns session_not_found', async () => {
+  const res = await request(app).post('/api/checkin').send({
+    meetCode: TEST_STALE_MEET_CODE,
+    participantEmail: 'stale-session@example.com',
+    joinTime: NOW,
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.ok, false);
+  assert.equal(res.body.status, 'session_not_found');
 });
 
 test('POST /api/checkin — KNS writes kns_attendance_manual', { skip: !knsAvailable }, async () => {

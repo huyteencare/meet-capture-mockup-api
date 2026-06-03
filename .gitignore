@@ -8,3 +8,5 @@ reports/*
 gcs-key.json
 *-key.json
 benchmark*.csv
+.env.staging
+.env.production

@@ -19,7 +19,7 @@ export function createCheckinRouter({ lmsSupabase }) {
 
       const now = joinTime || new Date().toISOString();
 
-      const session = await lookupMentor1on1Session(lmsSupabase, meetCode);
+      const session = await lookupMentor1on1Session(lmsSupabase, meetCode, now);
       if (session) {
         const record = await upsertMeetAttendance(lmsSupabase, {
           sessionId: session.id,
@@ -30,7 +30,7 @@ export function createCheckinRouter({ lmsSupabase }) {
         return res.json({ ok: true, type: SESSION_TYPE.MENTOR_1_1, attendanceId: record.id });
       }
 
-      const knsSession = await lookupKnsSession(lmsSupabase, meetCode);
+      const knsSession = await lookupKnsSession(lmsSupabase, meetCode, now);
       if (knsSession) {
         const record = await upsertKnsAttendance(lmsSupabase, {
           sessionId: knsSession.id,
