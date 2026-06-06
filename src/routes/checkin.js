@@ -41,16 +41,12 @@ export function createCheckinRouter({ lmsSupabase }) {
         return res.json({ ok: true, type: SESSION_TYPE.MENTOR_1_1, attendanceId: record.id });
       }
 
-      if ((participantType || PARTICIPANT_TYPE.STUDENT) === PARTICIPANT_TYPE.MENTOR) {
-        console.warn('[Checkin] mentor attempted KNS fallback and was rejected', {
-          meetCode,
-          participantEmail,
-        });
-        return res.json({ ok: false, status: 'session_not_found' });
-      }
-
       const knsSession = await lookupKnsSession(lmsSupabase, meetCode, now);
       if (knsSession) {
+        if ((participantType || PARTICIPANT_TYPE.STUDENT) === PARTICIPANT_TYPE.MENTOR) {
+          console.info('[Checkin] mentor kns acknowledged', { meetCode, sessionId: knsSession.id, participantEmail });
+          return res.json({ ok: true, type: SESSION_TYPE.KNS });
+        }
         const record = await upsertKnsAttendance(lmsSupabase, {
           sessionId: knsSession.id,
           studentEmail: participantEmail,

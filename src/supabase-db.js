@@ -344,17 +344,12 @@ export async function autoCheckin(supabase, { googleHandle, meetCode, joinTime }
     return { ok: true, type: SESSION_TYPE.MENTOR_1_1, attendanceId: record.id };
   }
 
-  if (participantType === PARTICIPANT_TYPE.MENTOR) {
-    console.warn('[AutoCheckin] mentor attempted KNS fallback and was rejected', {
-      meetCode,
-      googleHandle,
-      participantEmail,
-    });
-    return { ok: false, status: 'session_not_found' };
-  }
-
   const knsSession = await lookupKnsSession(supabase, meetCode, now);
   if (knsSession) {
+    if (participantType === PARTICIPANT_TYPE.MENTOR) {
+      console.info('[AutoCheckin] mentor kns acknowledged', { meetCode, sessionId: knsSession.id, participantEmail });
+      return { ok: true, type: SESSION_TYPE.KNS };
+    }
     const record = await upsertKnsAttendance(supabase, { sessionId: knsSession.id, studentEmail: participantEmail, markedAt: now });
     const classinSync = await syncKnsClassinAttendance(supabase, { session: knsSession, studentEmail: participantEmail });
     if (classinSync.updated) {
